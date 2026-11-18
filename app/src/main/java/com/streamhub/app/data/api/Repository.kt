@@ -88,10 +88,21 @@ fun categoryRequest(categoryId: String): CategoryRequest? = when (categoryId) {
 fun streamHost(url: String): String =
     runCatching { java.net.URI(url).host?.lowercase().orEmpty().ifBlank { url } }.getOrDefault(url)
 
+/**
+ * CDN host of a stream (v1.0.5): the raw URL behind /api/proxy when the
+ * stream carries one, else the URL itself. MUST be used for dedupe and
+ * fast_start matching — after wrapping, every proxied stream's `url`
+ * has the SAME host (the tunnel), so deduping on `url` collapsed all
+ * 7 mirrors of a title into 1 (proven live on "The Odyssey": the API
+ * returns 7 mirrors, the v1.0.4 app kept 1). Dedupe is by CDN host,
+ * never by proxy host.
+ */
+fun streamHostOf(stream: ApiStream): String = streamHost(stream.directUrl ?: stream.url)
+
 /** Dedupe mirrors by CDN host, keeping the first (server orders working CDNs first). */
 fun dedupeStreamsByHost(streams: List<ApiStream>): List<ApiStream> {
     val seen = mutableSetOf<String>()
-    return streams.filter { stream -> seen.add(streamHost(stream.url)) }
+    return streams.filter { stream -> seen.add(streamHostOf(stream)) }
 }
 
 /**
@@ -101,10 +112,17 @@ fun dedupeStreamsByHost(streams: List<ApiStream>): List<ApiStream> {
 fun applyFastStart(streams: List<ApiStream>, fastStart: String?): List<ApiStream> {
     if (fastStart.isNullOrBlank() || streams.isEmpty()) return streams
     val target = fastStart.trim()
+    // fast_start is a /api/proxy URL of the lowest-variant playlist:
+    // unwrap it to the raw URL, then match the stream whose raw URL or
+    // CDN host it is. (Matching on the wrapped URL never worked: every
+    // proxied stream shares the tunnel host, so the host comparison
+    // matched stream 0 and the hint was a no-op.)
+    val targetRaw = unwrapProxyUrl(target)
     val idx = streams.indexOfFirst { stream ->
         stream.url == target ||
-            streamHost(stream.url) == streamHost(target) ||
-            streamHost(stream.url).equals(target, ignoreCase = true)
+            stream.directUrl == targetRaw ||
+            streamHostOf(stream) == streamHost(targetRaw) ||
+            streamHostOf(stream).equals(target, ignoreCase = true)
     }
     if (idx <= 0) return streams
     return listOf(streams[idx]) + streams.filterIndexed { i, _ -> i != idx }
@@ -504,7 +522,20 @@ class Repository(
         val playable = raw
             .filter { !it.type.equals("embed", ignoreCase = true) }
             .map { stream ->
-                if (stream.proxy) stream.copy(url = api.proxyUrl(stream.url, stream.headers)) else stream
+                if (stream.proxy) {
+                    // v1.0.5: keep the RAW url as directUrl (the player
+                    // tries it FIRST, direct to the CDN, with headers)
+                    // and single-wrap url for the proxy fallback. The API
+                    // pre-wraps stream URLs; proxyUrl unwraps first, so
+                    // this never double-wraps.
+                    val rawUrl = unwrapProxyUrl(stream.url)
+                    stream.copy(
+                        url = api.proxyUrl(rawUrl, stream.headers),
+                        directUrl = rawUrl,
+                    )
+                } else {
+                    stream
+                }
             }
         return applyFastStart(dedupeStreamsByHost(api.sortStreams(playable)), fastStart)
     }

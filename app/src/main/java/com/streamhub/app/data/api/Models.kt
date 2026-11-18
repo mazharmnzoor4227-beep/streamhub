@@ -82,6 +82,15 @@ data class ApiStream(
     val label: String? = null,
     /** Source id the mirror came from (only set by /api/streams_all). */
     val source: String? = null,
+    /**
+     * Raw CDN URL behind /api/proxy (v1.0.5, direct-first playback).
+     * Set by [Repository] when it wraps a `proxy:true` stream: `url` is
+     * the (single-wrapped) proxy URL, `directUrl` is the unwrapped raw
+     * URL the player tries FIRST, with the stream's headers. Null when
+     * the stream was already direct (`proxy:false`) or the raw URL is
+     * unknown. Never null for a wrapped stream.
+     */
+    val directUrl: String? = null,
 )
 
 @Serializable

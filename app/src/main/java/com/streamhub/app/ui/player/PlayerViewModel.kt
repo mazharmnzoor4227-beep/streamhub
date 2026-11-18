@@ -57,6 +57,12 @@ import kotlinx.coroutines.launch
  *
  * Proxy rule: Repository already wraps proxy:true streams through
  * /api/proxy — the URLs are played exactly as returned, never re-wrapped here.
+ * Direct-first rule (v1.0.5): Repository ALSO keeps the raw CDN URL in
+ * ApiStream.directUrl. The player tries the DIRECT url first (with the
+ * stream's headers) and falls back to the proxy url ONLY when direct
+ * fails — then to the next mirror (see [autoFailover]). IP-bound signed
+ * URLs (Pornhub) are proxy-only ([PROXY_ONLY_SOURCE_IDS]) and are never
+ * tried direct.
  * Embed rule: type:"embed" streams are filtered out entirely, never offered.
  */
 /** Frame / aspect mode (v1.0.2, MovieBox-style): Fit = the video's real
@@ -150,8 +156,28 @@ class PlayerViewModel @JvmOverloads constructor(
     private val failedSourceIndices = mutableSetOf<Int>()
     private var sawFirstFrame = false
 
+    /** Mirror indices whose DIRECT attempt already failed (v1.0.5): their next attempt goes proxy. */
+    private val directFailedIndices = mutableSetOf<Int>()
+    /** True while the current load is a DIRECT attempt (v1.0.5). */
+    private var playingDirect = false
+
     private fun autoFailover(): Boolean {
         val sources = _sources.value
+        // v1.0.5 — direct-first: a mirror that failed on DIRECT gets one
+        // retry through the PROXY (same server, not the next mirror)
+        // before the mirror is written off. The proxy is the fallback
+        // for a refused direct CDN, not a separate server.
+        if (playingDirect) {
+            directFailedIndices.add(_currentSourceIndex.value)
+            playingDirect = false
+            val pos = exoPlayer?.currentPosition ?: 0L
+            _error.value = null
+            _isLoading.value = true
+            _message.value = "Direct stream failed, retrying via server…"
+            buildAndPlay(pos)
+            armLoadWatchdog()
+            return true
+        }
         if (sources.size < 2) {
             setAllMirrorsFailedError()
             return false
@@ -304,6 +330,7 @@ class PlayerViewModel @JvmOverloads constructor(
         _audioLang.value = "hindi"
         _availableAudioLanguages.value = listOf("hindi")
         failedSourceIndices.clear()
+        directFailedIndices.clear()
         sawFirstFrame = false
         _isOffline.value = false
         _offlineVariants.value = emptyList()
@@ -334,9 +361,11 @@ class PlayerViewModel @JvmOverloads constructor(
                 return@launch
             }
             // EMBED RULE: embed streams cannot play in ExoPlayer — drop them.
+            // Order is Repository's (fast_start first, working-CDN-first):
+            // do NOT re-sort by quality here — that undid fast_start and
+            // put the highest-quality (often slowest/dead) mirror first.
             val playable = response.streams
                 .filter { it.type != "embed" }
-                .sortedByDescending { it.quality ?: 0 }
             if (playable.isEmpty()) {
                 _error.value = "No playable stream found for this episode."
                 _isLoading.value = false
@@ -396,11 +425,23 @@ class PlayerViewModel @JvmOverloads constructor(
     private fun buildAndPlay(positionMs: Long) {
         val context = appContext ?: return
         val source = _sources.value.getOrNull(_currentSourceIndex.value) ?: return
+        // v1.0.5 — direct-first: play the raw CDN URL when the mirror has
+        // one and is not proxy-only; otherwise the proxy URL. The
+        // stream's headers ride as default request properties on the
+        // OkHttp factory either way (hotlink-protected CDNs need them).
+        val (playUrl, isDirect) = resolvePlayUrl(
+            source, currentSourceId, _currentSourceIndex.value in directFailedIndices,
+        )
+        playingDirect = isDirect
         // v1.0.3: OkHttpDataSource (connection pooling, HTTP/2, keep-alive,
         // 10s timeouts, DNS-over-HTTPS) over a 300MB LRU SimpleCache —
         // NOT DefaultHttpDataSource. Direct (proxy:false) streams get their
         // CDN headers as request headers; proxy:true streams already carry
         // Referer/UA inside the /api/proxy URL (see ApiClient.proxyUrl).
+        // v1.0.5: proxy:true streams ALSO carry their raw URL in directUrl
+        // and are played DIRECT first (playUrl above); the headers ride
+        // on the factory either way, so hotlink-protected CDNs still get
+        // their Referer on direct segment fetches.
         // The adaptive track selector starts from a LOW bandwidth estimate
         // (500 kbps), so HLS/DASH begins on the lowest variant and steps
         // up as real bandwidth is measured. Media3 DEFAULT buffers are
@@ -440,7 +481,7 @@ class PlayerViewModel @JvmOverloads constructor(
                 .build()
         }
         val item = MediaItem.Builder()
-            .setUri(source.url) // proxy:true URLs arrive already proxy-wrapped; play as given.
+            .setUri(playUrl) // v1.0.5: direct CDN URL first; proxy URL only as fallback.
             .setMimeType(if (source.type == "m3u8") MimeTypes.APPLICATION_M3U8 else MimeTypes.VIDEO_MP4)
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
@@ -556,7 +597,6 @@ class PlayerViewModel @JvmOverloads constructor(
             }
             val playable = response.streams
                 .filter { it.type != "embed" }
-                .sortedByDescending { it.quality ?: 0 }
             if (playable.isEmpty()) {
                 _message.value = "No playable stream in this language."
                 _isLoading.value = false
@@ -567,6 +607,7 @@ class PlayerViewModel @JvmOverloads constructor(
             _subtitles.value = response.subtitles.orEmpty()
             _currentSourceIndex.value = initialSourceIndex(playable)
             failedSourceIndices.clear()
+            directFailedIndices.clear()
             sawFirstFrame = false
             if (lang !in _availableAudioLanguages.value) {
                 _availableAudioLanguages.value = _availableAudioLanguages.value + lang
@@ -859,6 +900,38 @@ internal fun subtitleLabelToLang(label: String): String? {
 /** Adult source ids (hidden-folder extensions) — for History adult-flagging. */
 internal val ADULT_SOURCE_IDS: Set<String> =
     ExtensionsCatalog.adult.map { it.id }.toSet()
+
+/**
+ * Source ids whose signed stream URLs are IP-bound (v1.0.5): the
+ * signature is only valid from the server's IP, so scraping AND
+ * fetching must both come from the server — these streams are
+ * proxy-only and the player must never try them direct. (Pornhub:
+ * signed validfrom/validto + IP-bound hash, verified 2026-11-18.
+ * RedTube/YouPorn are signed but NOT IP-bound, so direct works for
+ * them.) Add a source here the day its extractor turns IP-bound.
+ */
+internal val PROXY_ONLY_SOURCE_IDS: Set<String> = setOf("pornhub")
+
+/**
+ * Which URL to play for one mirror (v1.0.5, direct-first). Pure, so it
+ * is unit-tested (see DirectPlaybackTest). Returns (url, isDirect).
+ * Direct first when the mirror has a raw CDN URL, is not proxy-only,
+ * and direct has not already failed for this mirror; otherwise the
+ * (single-wrapped) proxy URL.
+ */
+internal fun resolvePlayUrl(
+    stream: ApiStream,
+    sourceId: String?,
+    directFailed: Boolean,
+): Pair<String, Boolean> {
+    val direct = stream.directUrl
+    val proxyOnly = (stream.source ?: sourceId) in PROXY_ONLY_SOURCE_IDS
+    return if (direct != null && !proxyOnly && !directFailed) {
+        direct to true
+    } else {
+        stream.url to false
+    }
+}
 
 /**
  * Languages the audio probe checks (v1.0.3). These are CANDIDATES, not a

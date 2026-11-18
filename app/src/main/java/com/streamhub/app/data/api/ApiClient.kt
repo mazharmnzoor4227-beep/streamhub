@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -72,7 +73,13 @@ class ApiClient(
      * "User-Agent"/"user-agent"). No headers → plain `?url=` as before.
      */
     fun proxyUrl(rawUrl: String, headers: Map<String, String>? = null): String {
-        val base = "$DEFAULT_BASE_URL/api/proxy?url=${URLEncoder.encode(rawUrl, "UTF-8")}"
+        // v1.0.5 — idempotent: the API already returns proxy:true stream
+        // URLs pre-wrapped (see api_streams/api_streams_all), so wrap the
+        // UNWRAPPED raw URL, never a proxy URL again. (The server's
+        // _proxy_url_for does the same unwrap; both sides stay safe
+        // against double-wrapping.)
+        val raw = unwrapProxyUrl(rawUrl)
+        val base = "$DEFAULT_BASE_URL/api/proxy?url=${URLEncoder.encode(raw, "UTF-8")}"
         if (headers.isNullOrEmpty()) return base
         val referer = headerValue(headers, "Referer")
         val ua = headerValue(headers, "User-Agent")
@@ -349,4 +356,28 @@ class ApiClient(
     /** Best quality first; null/unknown quality sorts last, stable otherwise. */
     fun sortStreams(streams: List<ApiStream>): List<ApiStream> =
         streams.sortedWith(compareByDescending<ApiStream> { it.quality ?: -1 })
+}
+
+/**
+ * Raw URL behind a (possibly multiply-wrapped) `/api/proxy?url=`
+ * URL (v1.0.5): the API returns proxy:true stream URLs already
+ * pre-wrapped, and [ApiClient.proxyUrl] must never wrap a proxy URL
+ * again. Returns the URL itself when it is not a proxy URL. Top-level
+ * and pure JVM (manual query parsing) so unit tests and the
+ * Repository's top-level helpers can call it without Robolectric.
+ */
+fun unwrapProxyUrl(url: String): String {
+    var current = url.trim()
+    repeat(3) {
+        if ("/api/proxy?url=" !in current) return current
+        val query = current.substringAfter("?", "")
+        val inner = query.split("&")
+            .firstOrNull { it.startsWith("url=") }
+            ?.removePrefix("url=")
+            ?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+            ?: return current
+        current = inner
+    }
+    return current
 }

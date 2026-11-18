@@ -13,8 +13,8 @@ android {
         applicationId = "com.streamhub.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 6
+        versionName = "1.0.5"
         // 18+ gate key hash (SHA-256 hex). Empty = locked for everyone. NEVER ship a real key here;
         // the value is set from the user-provided key at release time.
         buildConfigField("String", "ADULT_KEY_HASH", "\"bd336581dacc92e40cbb487834880baf0add0ea4caf8ee952c105a01541f4197\"")
