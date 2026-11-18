@@ -217,7 +217,7 @@ fun PlayerScreen(
     LaunchedEffect(player) {
         val p = player
         surfaceView?.let { if (p != null) p.setVideoSurfaceView(it) }
-        subtitleView?.let { it.player = p }
+        subtitleView?.setPlayer(p)
     }
     // Auto Next: once per episode, shortly after playback ends.
     LaunchedEffect(playbackEnded) {
@@ -389,7 +389,7 @@ fun PlayerScreen(
                 },
                 update = { sv ->
                     subtitleView = sv
-                    sv.player = player
+                    sv.setPlayer(player)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
