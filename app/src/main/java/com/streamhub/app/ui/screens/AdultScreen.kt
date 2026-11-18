@@ -525,7 +525,7 @@ private fun AdultExtensionRow(
         ) {
             Text(
                 info.name.take(1).uppercase(), color = TextPrimary,
-                fontSize = 20.sp, fontWeight = FontBlack,
+                fontSize = 20.sp, fontWeight = FontWeight.Black,
             )
         }
         Spacer(Modifier.width(12.dp))
