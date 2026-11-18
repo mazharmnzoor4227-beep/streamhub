@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StreamHub</string>
+    <string name="download_channel_name">StreamHub downloads</string>
+    <string name="download_channel_description">Shows download progress for offline episodes</string>
+</resources>
