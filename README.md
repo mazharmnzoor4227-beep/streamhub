@@ -29,12 +29,13 @@ Home (rails) · Search · Details (seasons/episodes) · Player (ExoPlayer,
 custom controls: tap shows controls, ±10s skip with animation, quality /
 language / speed / subtitles, Skip Intro, Auto Next) · Downloads (in-app
 only, pause/resume/delete, offline playback) · Extensions · Settings
-(including API base URL and the 18+ key gate).
+(including the hidden-folder Lock). The API base URL is a build-time
+constant, hidden inside the app — there is no API setting anywhere.
 
 ## API
 
 Default base URL: `https://strategy-terry-masters-king.trycloudflare.com`
-(the live `anime-api`, changeable in Settings). Streams marked `proxy:true`
+(the live `anime-api`, build-time constant — changeable only via a new build). Streams marked `proxy:true`
 are played through `/api/proxy`; `embed`-type streams are never shown.
 
 ## Build

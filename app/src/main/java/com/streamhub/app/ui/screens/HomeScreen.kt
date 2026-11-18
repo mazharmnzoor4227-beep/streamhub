@@ -46,6 +46,8 @@ import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
 import com.streamhub.app.StreamHubApplication
+import com.streamhub.app.data.HistoryStore
+import com.streamhub.app.data.WatchlistStore
 import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.data.api.APP_CATEGORIES
 import com.streamhub.app.data.api.HomeSection
@@ -69,7 +71,11 @@ fun HomeScreen(
     onSearchClick: () -> Unit,
     onSeeAll: (HomeSection) -> Unit,
     onCategoryClick: (String) -> Unit,
-    adultUnlocked: Boolean,
+    onBrowseClick: () -> Unit,
+    // Jump straight into the player at the saved position (not Details).
+    onResumeTitle: (sourceId: String, detailsId: String, episodeNumber: Int, title: String, poster: String?) -> Unit,
+    onMyListClick: () -> Unit,
+    onHistoryClick: () -> Unit,
     // Hoisted by the app root: the vertical scroll position survives leaving
     // for Details/Player and coming back (scroll is restored, not reset).
     scrollState: ScrollState,
@@ -125,6 +131,11 @@ fun HomeScreen(
     }
 
     val continueWatching = remember(sections) { WatchProgressStore.loadAll(context) }
+    // My List + History (v1.0.2): local stores, re-read every time Home
+    // re-enters composition (after Details/Player), so a title saved or
+    // watched just now shows up immediately.
+    val myList = remember { WatchlistStore.loadAll(context) }
+    val history = remember { HistoryStore.loadAll(context) }
     val featured = sections.firstOrNull()?.items?.firstOrNull()
 
     Column(
@@ -211,8 +222,10 @@ fun HomeScreen(
         }
 
         // Categories (v1.0.2): real category browsing — every pill opens a
-        // grid that actually shows content from the API. The Adult pill
-        // appears here ONLY when unlocked (locked = completely invisible).
+        // grid that actually shows content from the API. The leading
+        // "Browse" pill opens the Type + Country + Year discover screen.
+        // There is NO adult pill here: adult content lives only in the
+        // hidden page (Settings → Lock → password), never on Home.
         Column(Modifier.padding(top = 22.dp)) {
             Row(Modifier.padding(horizontal = 20.dp)) {
                 SectionHeading("Categories")
@@ -221,11 +234,56 @@ fun HomeScreen(
                 Modifier.horizontalScroll(rememberScrollState()).padding(start = 20.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                Box(
+                    modifier = Modifier.clip(RoundedCornerShape(50)).background(Red)
+                        .clickable(onClick = onBrowseClick)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
                 APP_CATEGORIES.forEach { category ->
                     CategoryPill(category.title) { onCategoryClick(category.id) }
                 }
-                if (adultUnlocked) {
-                    CategoryPill("Adult (18+)") { onCategoryClick("adult") }
+            }
+        }
+
+        // My List (v1.0.2): titles saved from Details. Tap opens Details;
+        // "See all" opens the full My List grid.
+        if (myList.isNotEmpty()) {
+            Column(Modifier.padding(top = 24.dp)) {
+                Row(Modifier.padding(horizontal = 20.dp)) {
+                    SectionHeading("My List", "See all") { onMyListClick() }
+                }
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(start = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    myList.forEach { item ->
+                        PosterCard(item, { onItemClick(item) }, Modifier.width(138.dp))
+                    }
+                }
+            }
+        }
+
+        // History (v1.0.2): everything watched, newest first. Tap resumes
+        // exactly where the user left off (same path as Continue Watching).
+        if (history.isNotEmpty()) {
+            Column(Modifier.padding(top = 24.dp)) {
+                Row(Modifier.padding(horizontal = 20.dp)) {
+                    SectionHeading("History", "See all") { onHistoryClick() }
+                }
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(start = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    history.take(10).forEach { entry ->
+                        HistoryRailCard(entry) {
+                            onResumeTitle(
+                                entry.sourceId, entry.detailsId, entry.episodeNumber,
+                                entry.title, entry.poster,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -240,14 +298,13 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     continueWatching.forEach { entry ->
+                        // Tapping a card jumps STRAIGHT into the player at
+                        // the saved position (v1.0.2) — it used to open
+                        // Details only, which is why resume felt broken.
                         ContinueWatchingCard(entry) {
-                            onItemClick(
-                                ApiItem(
-                                    id = entry.detailsId,
-                                    title = entry.title,
-                                    poster = entry.poster,
-                                    source = entry.sourceId,
-                                ),
+                            onResumeTitle(
+                                entry.sourceId, entry.detailsId, entry.episodeNumber,
+                                entry.title, entry.poster,
                             )
                         }
                     }
@@ -298,6 +355,39 @@ private fun CategoryPill(text: String, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(text, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun HistoryRailCard(
+    entry: HistoryStore.HistoryEntry,
+    onClick: () -> Unit,
+) {
+    val progress = if (entry.durationMs > 0) {
+        (entry.positionMs.toFloat() / entry.durationMs).coerceIn(0f, 1f)
+    } else 0f
+    Row(
+        modifier = Modifier.width(250.dp).clip(RoundedCornerShape(14.dp)).background(SurfaceNight)
+            .clickable(onClick = onClick).padding(9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PosterArtwork(
+            ApiItem(id = entry.detailsId, title = entry.title, poster = entry.poster, source = entry.sourceId),
+            Modifier.width(64.dp).height(88.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(entry.title, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2)
+            Text(
+                (if (entry.episodeNumber > 0) "Episode ${entry.episodeNumber}" else "Movie") +
+                    " · " + HistoryStore.formatAgo(entry.watchedAtMs),
+                color = TextMuted, fontSize = 10.sp,
+            )
+            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(50)).background(DividerColor)) {
+                Box(Modifier.fillMaxWidth(progress.coerceAtLeast(0.05f)).height(4.dp).clip(RoundedCornerShape(50)).background(Red))
+            }
+            Text("${(progress * 100).toInt()}% watched", color = TextMuted, fontSize = 9.sp)
+        }
     }
 }
 

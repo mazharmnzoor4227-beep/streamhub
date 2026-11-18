@@ -19,9 +19,16 @@ import androidx.media3.exoplayer.offline.DownloadService
  * stream URL. The caller (Details screen) owns the stream choice and therefore owns
  * the proxy decision; this helper only records whatever URL it is handed.
  *
- * The download's title, source, content id, episode number and poster URL are stored
- * in the [DownloadRequest] data payload (fields separated by U+001F), so [list] can
- * rebuild [DownloadItem]s from the offline [DownloadIndex] without any other store.
+ * The download's title, source, content id, episode number, poster URL,
+ * audio language and HLS size estimate are stored in the [DownloadRequest]
+ * data payload (fields separated by U+001F), so [list] can rebuild
+ * [DownloadItem]s from the offline [DownloadIndex] without any other store.
+ * Payload fields: 0 title, 1 sourceId, 2 contentId, 3 episodeNumber,
+ * 4 posterUrl, 5 lang ("hindi"/"english"), 6 estimatedTotalBytes ("" if none).
+ * One download id per (episode, language): the same episode in Hindi and
+ * English are two separate downloads, so the offline player can switch
+ * between them. Legacy v1.0.1 downloads (no lang suffix, 5-field payload)
+ * are treated as the Hindi variant — [enqueue] never re-downloads one.
  */
 @UnstableApi
 object DownloadHelper {
@@ -50,8 +57,17 @@ object DownloadHelper {
         }
     }
 
-    /** Stable id for one downloadable item: "<sourceId>_<contentId hash>_<episode>". */
-    fun downloadId(sourceId: String, contentId: String, episodeNumber: Int): String =
+    /**
+     * Stable id for one downloadable item: "<sourceId>_<contentId hash>_<episode>_<lang>".
+     * One id per (episode, language) — Hindi and English variants of the
+     * same episode are separate downloads. [legacyId] is the v1.0.1 id
+     * (no lang suffix): a Hindi re-download must reuse it instead of
+     * downloading the same content twice.
+     */
+    fun downloadId(sourceId: String, contentId: String, episodeNumber: Int, lang: String = "hindi"): String =
+        "${sourceId}_${contentId.hashCode()}_${episodeNumber}_${lang.lowercase()}"
+
+    fun legacyId(sourceId: String, contentId: String, episodeNumber: Int): String =
         "${sourceId}_${contentId.hashCode()}_$episodeNumber"
 
     /**
@@ -63,9 +79,15 @@ object DownloadHelper {
      *  [MimeTypes.VIDEO_MP4] for progressive MP4.
      * @param posterUrl poster/banner URL shown in the Downloads list; may be null.
      * @param episodeNumber episode number, or 0 for a movie (single-item title).
+     * @param lang audio language of this variant ("hindi" first, always
+     *  included; "english" second). One download per language.
+     * @param estimatedTotalBytes HLS size estimate (see [HlsEstimate]) for
+     *  the progress % when the true total is unknown (-1 for HLS); null
+     *  when unknown (MP4 downloads know their real total).
      *
      * Re-tapping download on an already queued / downloading / completed item is a
      * no-op; re-tapping a paused item resumes it instead of queueing a duplicate.
+     * A Hindi re-download of a legacy v1.0.1 item reuses the legacy download.
      */
     fun enqueue(
         context: Context,
@@ -76,8 +98,11 @@ object DownloadHelper {
         playbackUrl: String,
         mimeType: String = MimeTypes.VIDEO_MP4,
         posterUrl: String? = null,
+        lang: String = "hindi",
+        estimatedTotalBytes: Long? = null,
     ) {
-        val id = downloadId(sourceId, contentId, episodeNumber)
+        val language = lang.lowercase()
+        val id = downloadId(sourceId, contentId, episodeNumber, language)
         when (stateOf(context, id)) {
             Download.STATE_QUEUED, Download.STATE_DOWNLOADING, Download.STATE_COMPLETED -> return
             Download.STATE_STOPPED -> {
@@ -86,12 +111,27 @@ object DownloadHelper {
             }
             else -> Unit // FAILED / REMOVING / unknown: (re-)enqueue below.
         }
+        if (language == "hindi") {
+            // Legacy v1.0.1 download of the same episode (no lang suffix):
+            // reuse it instead of downloading the same content twice.
+            val legacy = legacyId(sourceId, contentId, episodeNumber)
+            when (stateOf(context, legacy)) {
+                Download.STATE_QUEUED, Download.STATE_DOWNLOADING, Download.STATE_COMPLETED -> return
+                Download.STATE_STOPPED -> {
+                    resume(context, legacy)
+                    return
+                }
+                else -> Unit
+            }
+        }
         val data = listOf(
             title,
             sourceId,
             contentId,
             episodeNumber.toString(),
             posterUrl.orEmpty(),
+            language,
+            estimatedTotalBytes?.toString().orEmpty(),
         ).joinToString("\u001F")
         val request = DownloadRequest.Builder(id, android.net.Uri.parse(playbackUrl))
             .setCustomCacheKey(playbackUrl)
@@ -144,6 +184,11 @@ object DownloadHelper {
         )
     }
 
+    /** Delete every variant of one episode (all languages) — grouped delete. */
+    fun removeGroup(context: Context, downloadIds: List<String>) {
+        downloadIds.forEach { remove(context, it) }
+    }
+
     data class DownloadItem(
         val id: String,
         val title: String,
@@ -151,17 +196,29 @@ object DownloadHelper {
         val contentId: String,
         val episodeNumber: Int,
         val posterUrl: String?,
+        /** Audio language of this variant ("hindi"/"english"; legacy items read as "hindi"). */
+        val lang: String,
         val state: DownloadState,
         val progress: Float,
         val bytesDownloaded: Long,
         /** Total bytes, or -1 when the length is unknown (e.g. open-ended HLS). */
         val totalBytes: Long,
-    )
+        /** HLS size estimate (see [HlsEstimate]), or -1 when unknown. */
+        val estimatedTotalBytes: Long,
+        /** The URL that was enqueued (proxied for proxy:true streams). */
+        val playbackUrl: String,
+    ) {
+        /** Total to show progress against: real total, else the HLS estimate, else -1. */
+        val effectiveTotalBytes: Long
+            get() = if (totalBytes > 0) totalBytes else estimatedTotalBytes
+    }
 
     /**
      * Current downloads from the offline index, active downloads first, then
-     * completed, then failed. Progress is `bytesDownloaded / contentLength`
-     * (0 when the length is unknown).
+     * completed, then failed. Progress is `bytesDownloaded / effectiveTotal`
+     * — the real total when known, else the HLS estimate (see [HlsEstimate]),
+     * so an HLS download shows a moving % instead of a bare "Downloading…"
+     * with no percentage. 0 only when neither is known.
      */
     fun list(context: Context): List<DownloadItem> {
         val manager = try {
@@ -179,12 +236,14 @@ object DownloadHelper {
             while (cursor.moveToNext()) {
                 val d: Download = cursor.download
                 val total = d.contentLength
-                val progress = if (total > 0) {
-                    (d.bytesDownloaded.toFloat() / total).coerceIn(0f, 1f)
+                val parts = d.request.data.decodeToString().split("\u001F")
+                val estimated = parts.getOrNull(6)?.toLongOrNull() ?: -1L
+                val effectiveTotal = if (total > 0) total else estimated
+                val progress = if (effectiveTotal > 0) {
+                    (d.bytesDownloaded.toFloat() / effectiveTotal).coerceIn(0f, 1f)
                 } else {
                     0f
                 }
-                val parts = d.request.data.decodeToString().split("\u001F")
                 out.add(
                     DownloadItem(
                         id = d.request.id,
@@ -193,10 +252,13 @@ object DownloadHelper {
                         contentId = parts.getOrNull(2).orEmpty(),
                         episodeNumber = parts.getOrNull(3)?.toIntOrNull() ?: 0,
                         posterUrl = parts.getOrNull(4)?.ifBlank { null },
+                        lang = parts.getOrNull(5)?.ifBlank { "hindi" } ?: "hindi",
                         state = DownloadState.fromMedia3(d),
                         progress = progress,
                         bytesDownloaded = d.bytesDownloaded,
                         totalBytes = total,
+                        estimatedTotalBytes = estimated,
+                        playbackUrl = d.request.uri.toString(),
                     ),
                 )
             }

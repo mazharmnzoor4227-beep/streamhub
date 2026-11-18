@@ -3,6 +3,7 @@ package com.streamhub.app.ui.screens
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,10 +16,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
@@ -51,12 +55,15 @@ import androidx.media3.exoplayer.offline.Download
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.streamhub.app.StreamHubApplication
+import com.streamhub.app.data.WatchlistStore
 import com.streamhub.app.data.api.ApiDetails
 import com.streamhub.app.data.api.ApiEpisode
 import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.download.DownloadHelper
+import com.streamhub.app.download.HlsEstimate
 import com.streamhub.app.ui.components.SectionHeading
 import com.streamhub.app.ui.components.SmallTag
+import com.streamhub.app.ui.player.WatchProgressStore
 import com.streamhub.app.ui.theme.*
 import kotlinx.coroutines.launch
 
@@ -86,6 +93,12 @@ fun DetailsScreen(
     var selectedSeason by remember { mutableStateOf(0) }
     var downloadMessage by remember { mutableStateOf<String?>(null) }
     val downloadStates = remember { mutableStateMapOf<String, Int>() }
+    // My List (v1.0.2): saved locally via WatchlistStore.
+    var inMyList by remember { mutableStateOf(false) }
+
+    LaunchedEffect(item.id, sourceId) {
+        inMyList = WatchlistStore.isSaved(context, sourceId, item.id)
+    }
 
     LaunchedEffect(item.id, sourceId) {
         loading = true
@@ -113,10 +126,33 @@ fun DetailsScreen(
         }
     }
 
+    // Resume prompt (v1.0.2): the furthest episode with saved progress
+    // (position > 10s), with its position + duration. Recomputed whenever
+    // details load — returning from the player re-runs this, so the
+    // prompt always shows the latest saved position.
+    val resumeEntry = remember(details, item.id, sourceId) {
+        WatchProgressStore.loadAll(context)
+            .filter { it.sourceId == sourceId && it.detailsId == item.id && it.positionMs > 10_000 }
+            .maxByOrNull { it.episodeNumber }
+    }
+    val resumeEpisode = resumeEntry?.let { entry ->
+        val allEps = details?.seasons.orEmpty().flatMap { it.episodes.orEmpty() }
+        allEps.firstOrNull { it.number == entry.episodeNumber }
+            ?: ApiEpisode(number = entry.episodeNumber, title = item.title, data = item.id)
+    }
+
     fun downloadEpisode(ep: ApiEpisode) {
         scope.launch {
-            val state = downloadStates[ep.number.toString()]
-            if (state == Download.STATE_COMPLETED) {
+            // Already downloaded in BOTH languages? Then there is nothing to do.
+            val hindiState = DownloadHelper.stateOf(
+                context,
+                DownloadHelper.downloadId(sourceId, item.id, ep.number, "hindi"),
+            )
+            val englishState = DownloadHelper.stateOf(
+                context,
+                DownloadHelper.downloadId(sourceId, item.id, ep.number, "english"),
+            )
+            if (hindiState == Download.STATE_COMPLETED && englishState == Download.STATE_COMPLETED) {
                 downloadMessage = "Already downloaded — find it in Downloads."
                 return@launch
             }
@@ -125,25 +161,48 @@ fun DetailsScreen(
                 downloadMessage = "No stream available to download."
                 return@launch
             }
-            downloadMessage = "Finding best stream for download…"
-            val response = runCatching { repository.streams(sourceId, data) }.getOrNull()
-            val best = response?.streams?.maxByOrNull { it.quality ?: -1 }
-            if (best == null) {
-                downloadMessage = "No stream available to download."
-                return@launch
+            downloadMessage = "Finding streams for download…"
+            // ALL languages, Hindi first (always included): the same
+            // episode is resolved in each language via findSameEpisode
+            // (the API's lang= search); the direct stream is the fallback
+            // when a language cannot be resolved. A language whose stream
+            // is identical to one already queued is skipped (same file).
+            val seenStreams = mutableSetOf<String>()
+            var started = 0
+            for (lang in listOf("hindi", "english")) {
+                val found = runCatching {
+                    repository.findSameEpisode(item.title, ep.number, lang)
+                }.getOrNull()
+                val (src, epData) = if (found != null) found.source to found.data else sourceId to data
+                if (!seenStreams.add("$src|$epData")) continue
+                val response = runCatching { repository.streams(src, epData) }.getOrNull()
+                val best = response?.streams?.maxByOrNull { it.quality ?: -1 }
+                if (best == null) continue
+                // HLS total is unknown (-1): estimate it from the playlist
+                // so Downloads can show a real % (see HlsEstimate).
+                val estimate = if (best.type == "m3u8") {
+                    runCatching { HlsEstimate.estimate(best.url) }.getOrNull()
+                } else null
+                DownloadHelper.enqueue(
+                    context = context,
+                    title = item.title,
+                    sourceId = src,
+                    contentId = item.id,
+                    episodeNumber = ep.number,
+                    playbackUrl = best.url, // already proxy-wrapped by Repository when needed
+                    mimeType = if (best.type == "m3u8") MimeTypes.APPLICATION_M3U8 else MimeTypes.VIDEO_MP4,
+                    posterUrl = item.poster,
+                    lang = lang,
+                    estimatedTotalBytes = estimate,
+                )
+                started++
             }
-            DownloadHelper.enqueue(
-                context = context,
-                title = item.title,
-                sourceId = sourceId,
-                contentId = item.id,
-                episodeNumber = ep.number,
-                playbackUrl = best.url, // already proxy-wrapped by Repository when needed
-                mimeType = if (best.type == "m3u8") MimeTypes.APPLICATION_M3U8 else MimeTypes.VIDEO_MP4,
-                posterUrl = item.poster,
-            )
-            downloadStates[ep.number.toString()] = Download.STATE_QUEUED
-            downloadMessage = "Download started — see Downloads tab."
+            if (started == 0) {
+                downloadMessage = "No stream available to download."
+            } else {
+                downloadStates[ep.number.toString()] = Download.STATE_QUEUED
+                downloadMessage = "Download started in Hindi + English — see Downloads tab."
+            }
         }
     }
 
@@ -254,6 +313,49 @@ fun DetailsScreen(
                 Text(if (episodes.isEmpty()) "Watch Movie" else "Watch Now", fontWeight = FontWeight.Bold)
             }
 
+            // My List (v1.0.2): save this title to watch later.
+            Button(
+                onClick = { inMyList = WatchlistStore.toggle(context, item) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(13.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = SurfaceElevated, contentColor = TextPrimary),
+            ) {
+                Icon(
+                    if (inMyList) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                    contentDescription = null,
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(if (inMyList) "In My List" else "Add to My List", fontWeight = FontWeight.SemiBold)
+            }
+
+            // Resume prompt (v1.0.2): "you've watched this much" — tapping
+            // Resume opens the player at EXACTLY that episode + timestamp
+            // (the player seeks to the saved position on load).
+            if (resumeEntry != null && resumeEpisode != null && details != null) {
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(SurfaceNight)
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Continue watching", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(
+                            (if (resumeEntry.episodeNumber > 0) "Episode ${resumeEntry.episodeNumber} · " else "") +
+                                "Watched ${formatDuration(resumeEntry.positionMs)}" +
+                                if (resumeEntry.durationMs > 0) " of ${formatDuration(resumeEntry.durationMs)}" else "",
+                            color = TextMuted, fontSize = 11.sp,
+                        )
+                    }
+                    Button(
+                        onClick = { onPlay(details!!, resumeEpisode, sourceId) },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Red),
+                    ) {
+                        Text("Resume", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+            }
+
             if (loading) {
                 Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Red)
@@ -276,20 +378,49 @@ fun DetailsScreen(
                 Spacer(Modifier.height(3.dp))
                 SectionHeading("Episodes", if (seasons.size > 1) "Season ${currentSeason?.number ?: 1}" else null)
                 if (seasons.size > 1) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Prominent season selector (v1.0.2): a clear "Seasons"
+                    // header + a horizontally scrollable chip row. Each chip
+                    // shows the episode COUNT and RANGE from the season's
+                    // actual first/last episode numbers (e.g. "Season 5 •
+                    // 24 episodes • Ep 89–112"). The old chips were small,
+                    // in a non-scrollable row — 16 seasons clipped off-screen.
+                    Text(
+                        "Seasons", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
+                    )
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         seasons.forEachIndexed { index, season ->
+                            val eps = season.episodes.orEmpty()
+                            val first = eps.minOfOrNull { it.number }
+                            val last = eps.maxOfOrNull { it.number }
+                            val range = if (first != null && last != null && first != last) {
+                                "Ep $first–$last"
+                            } else if (first != null) {
+                                "Ep $first"
+                            } else ""
+                            val selected = index == selectedSeason
                             Box(
-                                Modifier.clip(RoundedCornerShape(50))
-                                    .background(if (index == selectedSeason) Red else SurfaceElevated)
+                                Modifier.clip(RoundedCornerShape(12.dp))
+                                    .background(if (selected) Red else SurfaceElevated)
                                     .clickable { selectedSeason = index }
-                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    .padding(horizontal = 14.dp, vertical = 9.dp),
                             ) {
-                                Text(
-                                    season.name ?: "Season ${season.number}",
-                                    color = if (index == selectedSeason) Color.White else TextMuted,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        season.name ?: "Season ${season.number}",
+                                        color = if (selected) Color.White else TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Text(
+                                        "${eps.size} episodes" + if (range.isNotBlank()) " · $range" else "",
+                                        color = if (selected) Color.White.copy(alpha = 0.85f) else TextMuted,
+                                        fontSize = 10.sp,
+                                    )
+                                }
                             }
                         }
                     }
@@ -308,11 +439,31 @@ fun DetailsScreen(
                             }.padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        // Wide landscape thumbnail (v1.0.2): the title
+                        // poster, cropped 16:9 — no number box here. The
+                        // "Episode N" label already carries the number.
+                        // Dark charcoal fallback if the poster fails
+                        // (never the old red).
                         Box(
-                            Modifier.size(48.dp).clip(RoundedCornerShape(10.dp)).background(SurfaceElevated),
-                            contentAlignment = Alignment.Center,
+                            Modifier.width(112.dp).height(64.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        listOf(Color(0xFF26262B), Color(0xFF17171A), Color(0xFF0E0E10)),
+                                    ),
+                                ),
                         ) {
-                            Text("${episode.number}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            if (artUrl != null) {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(LocalContext.current)
+                                        .data(artUrl)
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = "Episode ${episode.number}",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
                         }
                         Column(Modifier.weight(1f).padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
@@ -368,4 +519,13 @@ fun DetailsScreen(
             Spacer(Modifier.height(15.dp))
         }
     }
+}
+
+private fun formatDuration(ms: Long): String {
+    if (ms <= 0) return "0:00"
+    val totalSec = ms / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }

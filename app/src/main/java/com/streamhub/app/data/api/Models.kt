@@ -23,6 +23,10 @@ data class ApiItem(
     val poster: String? = null,
     val year: Int? = null,
     val type: String? = null,
+    // Country of origin where the API knows it (MovieBox countryName;
+    // anime sources = Japan; kdrama/cdrama = South Korea / China).
+    // Null when unknown — never guessed.
+    val country: String? = null,
     val audio: List<String>? = null,
     val source: String? = null,
 )

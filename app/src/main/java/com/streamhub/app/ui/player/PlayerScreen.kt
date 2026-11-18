@@ -66,6 +66,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,6 +95,7 @@ import com.streamhub.app.data.api.ApiDetails
 import com.streamhub.app.data.api.ApiEpisode
 import com.streamhub.app.download.DownloadHelper
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private val PlayerBg = Color(0xFF141414)
 private val PlayerSurface = Color(0xFF1E1E1E)
@@ -116,9 +118,15 @@ private fun formatMs(ms: Long): String {
  * StreamHub player. Custom controls ONLY — no PlayerView, no native controls,
  * no native popups/dialogs: every menu is a Compose DropdownMenu.
  *
- * Tap on the video surface SHOWS the controls only (never toggles pause);
- * pause/resume happens only via the play/pause button. Double-tap left/right
- * seeks -10s/+10s with an animated feedback overlay.
+ * Tap on the video surface TOGGLES the controls (first tap shows, second
+ * tap hides) — it never toggles pause; pause/resume happens only via the
+ * play/pause button. Double-tap left/right seeks -10s/+10s with an animated
+ * feedback overlay. HOLD on the video (400ms) plays at 2x while held, with
+ * a "2x" indicator, and releases back to the previous speed.
+ *
+ * Aspect modes (v1.0.2, MovieBox-style): the chip in the top bar cycles
+ * Fit (real aspect ratio) → Fill (cropped fullscreen) → Zoom (cropped +
+ * enlarged). The mode is shown on the chip itself.
  *
  * Portrait layout (390px test width): top bar, 16:9 video, then the seek bar
  * on its own full-width row, a transport row and an icon-only settings row —
@@ -126,7 +134,9 @@ private fun formatMs(ms: Long): String {
  * overlay the video and auto-hide after 3s of inactivity.
  *
  * Offline mode: pass [offlineItem] (details/episode null) to play a completed
- * download from the shared cache with no network.
+ * download from the shared cache with no network. [offlineVariants] are the
+ * other downloaded languages of the same episode — the Audio menu switches
+ * between them offline.
  */
 @OptIn(UnstableApi::class, ExperimentalAnimationApi::class)
 @Composable
@@ -135,6 +145,7 @@ fun PlayerScreen(
     episode: ApiEpisode?,
     sourceId: String,
     offlineItem: DownloadHelper.DownloadItem? = null,
+    offlineVariants: List<DownloadHelper.DownloadItem> = emptyList(),
     onBack: () -> Unit,
     onNextEpisode: (() -> Unit)? = null,
     onPrevEpisode: (() -> Unit)? = null,
@@ -154,6 +165,10 @@ fun PlayerScreen(
     val message by viewModel.message.collectAsState()
     val speed by viewModel.speed.collectAsState()
     val audioLang by viewModel.audioLang.collectAsState()
+    val aspectMode by viewModel.aspectMode.collectAsState()
+    val isOffline by viewModel.isOffline.collectAsState()
+    val offlineVariantsState by viewModel.offlineVariants.collectAsState()
+    val offlineLang by viewModel.offlineLang.collectAsState()
     val skipIntroRange by viewModel.skipIntroRange.collectAsState()
     val playbackEnded by viewModel.playbackEnded.collectAsState()
     val player by viewModel.player.collectAsState()
@@ -172,6 +187,10 @@ fun PlayerScreen(
     var surfaceView by remember { mutableStateOf<SurfaceView?>(null) }
     var subtitleView by remember { mutableStateOf<SubtitleView?>(null) }
     var autoNextFiredFor by remember { mutableStateOf<String?>(null) }
+    // Hold-for-2x (v1.0.2): true while the video is held at 2x speed.
+    var hold2x by remember { mutableStateOf(false) }
+    var holdSpeedBefore by remember { mutableFloatStateOf(1f) }
+    val gestureScope = rememberCoroutineScope()
 
     val displayTitle = offlineItem?.title ?: details?.title ?: ""
     val displayEpisodeLabel = when {
@@ -190,9 +209,18 @@ fun PlayerScreen(
         interactionTick++
     }
 
+    /** Single tap TOGGLES the controls (v1.0.2): first tap shows, second tap hides. Never pauses. */
+    fun toggleControls() {
+        if (controlsVisible) {
+            controlsVisible = false
+        } else {
+            pokeControls()
+        }
+    }
+
     LaunchedEffect(details?.id, episode?.data, sourceId, offlineItem?.id) {
         if (offlineItem != null) {
-            viewModel.playOffline(context, offlineItem)
+            viewModel.playOffline(context, offlineItem, offlineVariants)
         } else if (details != null && episode != null) {
             viewModel.play(context, details, episode, sourceId)
         }
@@ -275,7 +303,12 @@ fun PlayerScreen(
     val qualityLabel = sources.getOrNull(currentSourceIndex)?.let { src ->
         if ((src.quality ?: 0) > 0) "${src.quality}p" else src.name
     } ?: "Auto"
-    val audioLabel = if (audioLang == "hindi") "Hindi" else "English"
+    // Offline: the audio label is the downloaded variant's language.
+    val audioLabel = when {
+        isOffline -> if (offlineLang == "hindi") "Hindi" else "English"
+        audioLang == "hindi" -> "Hindi"
+        else -> "English"
+    }
     val subtitleLabel = when {
         !captionsEnabled -> "Off"
         preferredSubtitleLang != null -> subtitleDisplayLabel(preferredSubtitleLang!!)
@@ -310,6 +343,16 @@ fun PlayerScreen(
                     color = PlayerMuted, fontSize = 12.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            // Aspect / frame chip (v1.0.2): shows the active mode, tap cycles
+            // Fit → Fill → Zoom. Same chip in portrait and fullscreen.
+            Box(
+                Modifier.clip(RoundedCornerShape(10.dp))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .clickable { viewModel.cycleAspectMode(); pokeControls() }
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+            ) {
+                Text(aspectMode.label, color = PlayerText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -367,10 +410,33 @@ fun PlayerScreen(
                 .onSizeChanged { videoWidthPx = it.width }
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        // Tap = SHOW controls only. Never toggles pause.
-                        onTap = { pokeControls() },
+                        // Tap TOGGLES the controls (v1.0.2): show on first
+                        // tap, hide on second. Never toggles pause.
+                        onTap = { toggleControls() },
                         onDoubleTap = { offset ->
                             doSkip(offset.x >= videoWidthPx / 2f)
+                        },
+                        // Hold (400ms) = 2x while held, with a "2x"
+                        // indicator; release restores the previous speed.
+                        // Quick taps release before the delay fires, so
+                        // tap / double-tap are unaffected. Works on the
+                        // whole video area, including the left side.
+                        onPress = {
+                            val job = gestureScope.launch {
+                                delay(400)
+                                holdSpeedBefore = viewModel.speed.value
+                                viewModel.setSpeed(2f)
+                                hold2x = true
+                            }
+                            try {
+                                awaitRelease()
+                            } finally {
+                                job.cancel()
+                                if (hold2x) {
+                                    viewModel.setSpeed(holdSpeedBefore)
+                                    hold2x = false
+                                }
+                            }
                         },
                     )
                 },
@@ -383,7 +449,12 @@ fun PlayerScreen(
                     surfaceView = sv
                     player?.setVideoSurfaceView(sv)
                 },
-                modifier = Modifier.fillMaxSize(),
+                // Zoom mode: the surface itself is enlarged ~1.3x on top of
+                // the cropped scaling (see ViewModel.applyAspectMode).
+                // Subtitles and controls are NOT scaled.
+                modifier = Modifier.fillMaxSize().then(
+                    if (aspectMode == AspectMode.ZOOM) Modifier.scale(1.3f) else Modifier,
+                ),
             )
             AndroidView(
                 factory = { ctx ->
@@ -416,7 +487,7 @@ fun PlayerScreen(
                             Modifier.clip(RoundedCornerShape(10.dp)).background(PlayerRed)
                                 .clickable {
                                     if (offlineItem != null) {
-                                        viewModel.playOffline(context, offlineItem)
+                                        viewModel.playOffline(context, offlineItem, offlineVariants)
                                     } else if (details != null && episode != null) {
                                         viewModel.play(context, details, episode, sourceId)
                                     }
@@ -446,6 +517,17 @@ fun PlayerScreen(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                 ) {
                     Text(message!!, color = Color.White, fontSize = 12.sp)
+                }
+            }
+            // Hold-for-2x indicator (v1.0.2): visible while held at 2x.
+            if (hold2x) {
+                Box(
+                    Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.75f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Text("2x", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
             }
             // Double-tap seek feedback: circular arrow + "10", rotates/pulses then fades.
@@ -592,13 +674,34 @@ fun PlayerScreen(
                     expanded = openMenu == "Audio",
                     onOpen = { openMenu = "Audio" }, onDismiss = { openMenu = null },
                 ) {
-                    MenuOption(label = "Hindi", selected = audioLang == "hindi") {
-                        viewModel.switchAudio("hindi")
-                        openMenu = null
-                    }
-                    MenuOption(label = "English", selected = audioLang == "english") {
-                        viewModel.switchAudio("english")
-                        openMenu = null
+                    if (isOffline) {
+                        // Offline: switch between the DOWNLOADED language
+                        // variants of this episode (v1.0.2) — no network.
+                        val variants = offlineVariantsState
+                        if (variants.isEmpty()) {
+                            MenuOption(label = "No downloaded audio", selected = false) { openMenu = null }
+                        } else {
+                            variants.forEach { variant ->
+                                val label = when (variant.lang.lowercase()) {
+                                    "hindi" -> "Hindi"
+                                    "english" -> "English"
+                                    else -> variant.lang.replaceFirstChar { it.uppercase() }
+                                }
+                                MenuOption(label = label, selected = offlineLang == variant.lang) {
+                                    viewModel.switchOfflineVariant(variant)
+                                    openMenu = null
+                                }
+                            }
+                        }
+                    } else {
+                        MenuOption(label = "Hindi", selected = audioLang == "hindi") {
+                            viewModel.switchAudio("hindi")
+                            openMenu = null
+                        }
+                        MenuOption(label = "English", selected = audioLang == "english") {
+                            viewModel.switchAudio("english")
+                            openMenu = null
+                        }
                     }
                 }
                 IconButton(

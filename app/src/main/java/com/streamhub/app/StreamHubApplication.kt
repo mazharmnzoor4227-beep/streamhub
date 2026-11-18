@@ -51,7 +51,7 @@ class StreamHubApplication : Application(), ImageLoaderFactory {
         super.onCreate()
         settings = SettingsStore(this)
         extensions = ExtensionStore(this)
-        apiClient = ApiClient(settings)
+        apiClient = ApiClient()
         feedCache = FeedCache(this)
         repository = Repository(apiClient, extensions, feedCache)
         // Pre-warm the home feed in the background (disk cache + a silent

@@ -5,10 +5,10 @@ package com.streamhub.app.data.extensions
  * The live list of sources still comes from `GET /api/sources`; this catalog
  * only supplies display info and the first-run default-enabled set.
  *
- * NOTE: `hentaihaven` is listed here for the locked 18+ section only. Its
+ * NOTE: `hentaihaven` is listed here for the hidden folder (18+) only. Its
  * source IS in the API (v1.5.0, verified live 2026-11-18: search + streams +
  * proxy all work, English subtitles, no Hindi dub), but it must only ever be
- * queried from the unlocked adult section — never from home/search/trending.
+ * queried from the hidden page — never from home/search/trending.
  */
 data class ExtensionInfo(
     val id: String,
@@ -107,7 +107,7 @@ object ExtensionsCatalog {
             category = "Movies",
             description = "Hollywood movies, some with Hindi dub.",
         ),
-        // 18+ section only — live in the API (v1.5.0), gated by the adult key.
+        // Hidden folder only — live in the API (v1.5.0), gated by the password.
         ExtensionInfo(
             id = "hentaihaven",
             name = "HentaiHaven",
@@ -128,7 +128,7 @@ object ExtensionsCatalog {
     /** Non-adult extensions only (the main Extensions screen). */
     val standard: List<ExtensionInfo> = all.filter { !it.isAdult }
 
-    /** 18+ extensions only (the separate, locked-by-default section). */
+    /** 18+ extensions only (the hidden page, Settings → Lock → password). */
     val adult: List<ExtensionInfo> = all.filter { it.isAdult }
 
     fun byId(id: String): ExtensionInfo? = all.find { it.id == id }

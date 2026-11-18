@@ -1,6 +1,5 @@
 package com.streamhub.app.data.api
 
-import com.streamhub.app.data.SettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
@@ -14,8 +13,9 @@ import java.util.concurrent.TimeUnit
 /**
  * HTTP client for the StreamHub Flask API (BUILD-CONTRACT.md v1.0).
  *
- * - Base URL comes from [SettingsStore] (default: the tunnel URL) and is
- *   re-read on every call, so a Settings change applies immediately.
+ * - Base URL is the build-time constant [DEFAULT_BASE_URL] ONLY. There is
+ *   no in-app setting and no override: the API stays behind the scenes,
+ *   and a URL change ships with a new build.
  * - Never throws: every call catches its own failures and returns an empty
  *   result, so the UI always starts from an empty list, never a crash.
  * - EXCLUDED sources (pkdramas, animedekho, rareanimes) are filtered out
@@ -24,7 +24,6 @@ import java.util.concurrent.TimeUnit
  *   intact — callers (Repository/player) decide how to play them.
  */
 class ApiClient(
-    private val settings: SettingsStore,
     private val client: OkHttpClient = defaultClient(),
 ) {
 
@@ -54,29 +53,17 @@ class ApiClient(
     }
 
     /**
-     * Last base URL read from Settings. Refreshed on every API call; used by
-     * the synchronous [proxyUrl] so it never needs a suspend context.
-     * Starts at the default until the first call reads Settings.
+     * The base URL is the build-time constant, always. Kept as a function
+     * (instead of inlining the constant) so callers need no change.
      */
-    @Volatile
-    private var cachedBaseUrl: String = DEFAULT_BASE_URL
-
-    /** Reads the current base URL from Settings and refreshes the cache. */
-    suspend fun currentBaseUrl(): String {
-        val base = runCatching { settings.currentBaseUrl() }
-            .getOrDefault(DEFAULT_BASE_URL)
-            .trimEnd('/')
-            .ifBlank { DEFAULT_BASE_URL }
-        cachedBaseUrl = base
-        return base
-    }
+    fun currentBaseUrl(): String = DEFAULT_BASE_URL
 
     /**
      * Proxied playback/download URL for a raw stream URL.
      * `proxy:true` streams must ALWAYS be played via this URL, never raw.
      */
     fun proxyUrl(rawUrl: String): String =
-        "$cachedBaseUrl/api/proxy?url=${URLEncoder.encode(rawUrl, "UTF-8")}"
+        "$DEFAULT_BASE_URL/api/proxy?url=${URLEncoder.encode(rawUrl, "UTF-8")}"
 
     /**
      * Poster/artwork URL, routed through `/api/proxy` (same fast origin as
@@ -202,6 +189,36 @@ class ApiClient(
                     "source" to source,
                     "page" to page.toString(),
                     "section" to section,
+                ),
+            )
+        }.getOrNull()?.let(::filterExcluded) ?: ApiListResponse()
+
+    /**
+     * Browse / Discover list (v1.0.2): /api/latest with the semantic
+     * browse filters — type=anime|series|movie (source-based, NOT the
+     * unreliable per-item type), country (USA, Germany, Korea, Japan,
+     * China, India, …), year_from/year_to. All params are optional;
+     * omitting them is a plain /api/latest call.
+     */
+    suspend fun browse(
+        type: String? = null,
+        country: String? = null,
+        yearFrom: Int? = null,
+        yearTo: Int? = null,
+        lang: String = "all",
+        page: Int = 1,
+    ): ApiListResponse =
+        runCatching {
+            getJson<ApiListResponse>(
+                "/api/latest",
+                mapOf(
+                    "lang" to lang,
+                    "source" to "all",
+                    "page" to page.toString(),
+                    "type" to type,
+                    "country" to country,
+                    "year_from" to yearFrom?.toString(),
+                    "year_to" to yearTo?.toString(),
                 ),
             )
         }.getOrNull()?.let(::filterExcluded) ?: ApiListResponse()

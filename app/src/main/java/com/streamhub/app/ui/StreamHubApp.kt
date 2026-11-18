@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,7 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -36,23 +36,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
 import com.streamhub.app.StreamHubApplication
+import com.streamhub.app.data.WatchlistStore
 import com.streamhub.app.data.api.ApiDetails
 import com.streamhub.app.data.api.ApiEpisode
 import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.data.api.APP_CATEGORIES
+import com.streamhub.app.data.api.BrowseFilter
 import com.streamhub.app.data.api.HomeSection
 import com.streamhub.app.download.DownloadHelper
 import com.streamhub.app.ui.player.PlayerScreen
 import com.streamhub.app.ui.screens.AdultScreen
+import com.streamhub.app.ui.screens.BrowseScreen
 import com.streamhub.app.ui.screens.CategoryScreen
 import com.streamhub.app.ui.screens.DetailsScreen
 import com.streamhub.app.ui.screens.DownloadsScreen
 import com.streamhub.app.ui.screens.ExtensionsScreen
+import com.streamhub.app.ui.screens.HistoryScreen
 import com.streamhub.app.ui.screens.HomeScreen
 import com.streamhub.app.ui.screens.SearchScreen
 import com.streamhub.app.ui.screens.SeeAllScreen
@@ -65,30 +70,40 @@ enum class MainTab(val label: String, val icon: ImageVector) {
     SEARCH("Search", Icons.Default.Search),
     EXTENSIONS("Extensions", Icons.Default.Extension),
     DOWNLOADS("Downloads", Icons.Default.Download),
-    ADULT("Adult", Icons.Default.Lock),
     SETTINGS("Settings", Icons.Default.Settings),
 }
 
 /** What the player is playing: a streamed episode, or a downloaded file. */
 private sealed interface PlayTarget {
     data class Online(val details: ApiDetails, val episode: ApiEpisode, val sourceId: String) : PlayTarget
-    data class Offline(val item: DownloadHelper.DownloadItem) : PlayTarget
+    /** [variants] are the other downloaded languages of the same episode (offline audio switch). */
+    data class Offline(
+        val item: DownloadHelper.DownloadItem,
+        val variants: List<DownloadHelper.DownloadItem> = emptyList(),
+    ) : PlayTarget
 }
 
 @OptIn(UnstableApi::class)
 @Composable
 fun StreamHubApp() {
+    val context = LocalContext.current
     var activeTab by remember { mutableStateOf(MainTab.HOME) }
     // Selected title (item + its source id) shown in Details.
     var selectedItem by remember { mutableStateOf<Pair<ApiItem, String>?>(null) }
     var playTarget by remember { mutableStateOf<PlayTarget?>(null) }
-    var showAdult by remember { mutableStateOf(false) }
+    // The hidden folder (18+): a separate page reachable ONLY from
+    // Settings → Lock → password. It is NOT a tab, NOT in Extensions,
+    // NOT on Home — it exists only while this flag is set, and opening it
+    // always requires the password again (see SettingsScreen).
+    var showHiddenFolder by remember { mutableStateOf(false) }
     var seeAllSection by remember { mutableStateOf<HomeSection?>(null) }
     var categoryId by remember { mutableStateOf<String?>(null) }
-
-    // Key gate: the Adult tab exists ONLY when unlocked. Locked = the tab,
-    // the section and the category are completely invisible.
-    val adultUnlocked by StreamHubApplication.settings.adultUnlocked.collectAsState(initial = false)
+    // Browse / Discover (v1.0.2): Type + Country + Year, hoisted so the
+    // filter survives leaving for Details and coming back.
+    var showBrowse by remember { mutableStateOf(false) }
+    var browseFilter by remember { mutableStateOf(BrowseFilter()) }
+    var showMyList by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
 
     // ---- Hoisted scroll / list state (v1.0.2, scroll restore) -------------
     // These live at the app root, so they survive leaving a list for
@@ -101,6 +116,9 @@ fun StreamHubApp() {
     val seeAllGridState = rememberLazyGridState()
     val adultGridState = rememberLazyGridState()
     val categoryGridState = rememberLazyGridState()
+    val browseGridState = rememberLazyGridState()
+    val myListGridState = rememberLazyGridState()
+    val historyListState = rememberLazyListState()
 
     // Search query + filters are hoisted too: without them, returning to
     // Search would reset to the Popular list and the restored scroll
@@ -114,15 +132,19 @@ fun StreamHubApp() {
     val playing = playTarget
     val inPlayer = playing != null
     val inDetails = selectedItem != null && playing == null
-    val inOverlay = showAdult || seeAllSection != null || categoryId != null
+    val inOverlay = showHiddenFolder || seeAllSection != null || categoryId != null ||
+        showBrowse || showMyList || showHistory
 
     BackHandler(enabled = inPlayer || selectedItem != null || inOverlay) {
         when {
             inPlayer -> playTarget = null
             selectedItem != null -> selectedItem = null
-            showAdult -> showAdult = false
+            showHiddenFolder -> showHiddenFolder = false
             seeAllSection != null -> seeAllSection = null
             categoryId != null -> categoryId = null
+            showBrowse -> showBrowse = false
+            showMyList -> showMyList = false
+            showHistory -> showHistory = false
         }
     }
 
@@ -145,29 +167,53 @@ fun StreamHubApp() {
     }
 
     fun openCategory(id: String) {
-        if (id == "adult") {
-            showAdult = true
-        } else {
-            // A different category starts at the top; the same category
-            // keeps its position (e.g. back from Details).
-            if (categoryId != id) {
-                scope.launch { categoryGridState.scrollToItem(0) }
-            }
-            categoryId = id
+        // A different category starts at the top; the same category
+        // keeps its position (e.g. back from Details).
+        if (categoryId != id) {
+            scope.launch { categoryGridState.scrollToItem(0) }
         }
+        categoryId = id
     }
 
-    // If the Adult tab is showing while locked (cannot happen through the
-    // UI — the tab is hidden when locked), fall back to Home.
-    val effectiveTab = if (activeTab == MainTab.ADULT && !adultUnlocked) MainTab.HOME else activeTab
+    /**
+     * Resume a title from Continue Watching / History (v1.0.2): load the
+     * details, find the saved episode across ALL seasons (movies: the
+     * single pseudo-episode), and jump STRAIGHT into the player — the
+     * player seeks to the saved position on load. When the details call
+     * fails, fall back to opening Details for the title instead of a
+     * silent no-op.
+     */
+    fun resumeTitle(
+        sourceId: String,
+        detailsId: String,
+        episodeNumber: Int,
+        title: String,
+        poster: String?,
+    ) {
+        scope.launch {
+            val details = runCatching {
+                StreamHubApplication.repository.details(sourceId, detailsId)
+            }.getOrNull()
+            if (details == null) {
+                openItem(ApiItem(id = detailsId, title = title, poster = poster, source = sourceId))
+                return@launch
+            }
+            val allEpisodes = details.seasons.orEmpty().flatMap { it.episodes.orEmpty() }
+            val episode = when {
+                episodeNumber > 0 -> allEpisodes.firstOrNull { it.number == episodeNumber }
+                allEpisodes.isNotEmpty() -> allEpisodes.first()
+                else -> null
+            } ?: ApiEpisode(number = episodeNumber, title = title, data = detailsId)
+            playTarget = PlayTarget.Online(details, episode, sourceId)
+        }
+    }
 
     Scaffold(
         containerColor = Night,
         bottomBar = {
             if (!inPlayer && selectedItem == null && !inOverlay) {
                 BottomNavigationBar(
-                    activeTab = effectiveTab,
-                    showAdultTab = adultUnlocked,
+                    activeTab = activeTab,
                     onTabSelected = { activeTab = it },
                 )
             }
@@ -197,6 +243,7 @@ fun StreamHubApp() {
                         episode = null,
                         sourceId = target.item.sourceId,
                         offlineItem = target.item,
+                        offlineVariants = target.variants,
                         onBack = { playTarget = null },
                     )
                 }
@@ -215,14 +262,10 @@ fun StreamHubApp() {
                         scrollState = detailsScrollState,
                     )
                 }
-                showAdult -> {
+                showHiddenFolder -> {
                     AdultScreen(
                         onItemClick = { openItem(it) },
-                        onBack = { showAdult = false },
-                        onOpenExtensions = {
-                            showAdult = false
-                            activeTab = MainTab.EXTENSIONS
-                        },
+                        onBack = { showHiddenFolder = false },
                         gridState = adultGridState,
                     )
                 }
@@ -247,7 +290,37 @@ fun StreamHubApp() {
                         onBack = { categoryId = null },
                     )
                 }
-                else -> when (effectiveTab) {
+                showBrowse -> {
+                    BrowseScreen(
+                        filter = browseFilter,
+                        onFilterChange = { browseFilter = it },
+                        gridState = browseGridState,
+                        onItemClick = { openItem(it) },
+                        onBack = { showBrowse = false },
+                    )
+                }
+                showMyList -> {
+                    SeeAllScreen(
+                        title = "My List",
+                        items = WatchlistStore.loadAll(context),
+                        gridState = myListGridState,
+                        onItemClick = { openItem(it) },
+                        onBack = { showMyList = false },
+                    )
+                }
+                showHistory -> {
+                    HistoryScreen(
+                        listState = historyListState,
+                        onResume = { entry ->
+                            resumeTitle(
+                                entry.sourceId, entry.detailsId, entry.episodeNumber,
+                                entry.title, entry.poster,
+                            )
+                        },
+                        onBack = { showHistory = false },
+                    )
+                }
+                else -> when (activeTab) {
                     MainTab.HOME -> HomeScreen(
                         onItemClick = { openItem(it) },
                         onSearchClick = { activeTab = MainTab.SEARCH },
@@ -260,7 +333,12 @@ fun StreamHubApp() {
                             seeAllSection = section
                         },
                         onCategoryClick = { openCategory(it) },
-                        adultUnlocked = adultUnlocked,
+                        onBrowseClick = { showBrowse = true },
+                        onResumeTitle = { sourceId, detailsId, episodeNumber, title, poster ->
+                            resumeTitle(sourceId, detailsId, episodeNumber, title, poster)
+                        },
+                        onMyListClick = { showMyList = true },
+                        onHistoryClick = { showHistory = true },
                         scrollState = homeScrollState,
                     )
                     MainTab.SEARCH -> SearchScreen(
@@ -273,20 +351,15 @@ fun StreamHubApp() {
                         typeFilter = searchTypeFilter,
                         onTypeFilterChange = { searchTypeFilter = it },
                     )
-                    MainTab.EXTENSIONS -> ExtensionsScreen(
-                        onBrowseAdult = { showAdult = true },
-                        onOpenSettings = { activeTab = MainTab.SETTINGS },
-                    )
+                    MainTab.EXTENSIONS -> ExtensionsScreen()
                     MainTab.DOWNLOADS -> DownloadsScreen(
-                        onPlayOffline = { item -> playTarget = PlayTarget.Offline(item) },
+                        onPlayOffline = { item, variants ->
+                            playTarget = PlayTarget.Offline(item, variants)
+                        },
                     )
-                    MainTab.ADULT -> AdultScreen(
-                        onItemClick = { openItem(it) },
-                        onBack = { activeTab = MainTab.HOME },
-                        onOpenExtensions = { activeTab = MainTab.EXTENSIONS },
-                        gridState = adultGridState,
+                    MainTab.SETTINGS -> SettingsScreen(
+                        onOpenHiddenFolder = { showHiddenFolder = true },
                     )
-                    MainTab.SETTINGS -> SettingsScreen()
                 }
             }
         }
@@ -296,11 +369,11 @@ fun StreamHubApp() {
 @Composable
 private fun BottomNavigationBar(
     activeTab: MainTab,
-    showAdultTab: Boolean,
     onTabSelected: (MainTab) -> Unit,
 ) {
-    // The Adult tab is rendered ONLY when unlocked; locked users never see it.
-    val tabs = MainTab.entries.filter { it != MainTab.ADULT || showAdultTab }
+    // Five tabs only. There is deliberately NO adult tab: the hidden page
+    // is reachable only from Settings → Lock → password.
+    val tabs = MainTab.entries
     Row(
         modifier = Modifier.fillMaxWidth().background(SurfaceNight).navigationBarsPadding()
             .padding(horizontal = 8.dp, vertical = 8.dp),

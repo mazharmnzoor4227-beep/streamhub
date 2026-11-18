@@ -2,6 +2,7 @@ package com.streamhub.app.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,8 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -47,7 +48,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.streamhub.app.StreamHubApplication
 import com.streamhub.app.data.AdultGate
-import com.streamhub.app.data.api.ApiClient
 import com.streamhub.app.data.extensions.ExtensionsCatalog
 import com.streamhub.app.ui.components.CategoryChips
 import com.streamhub.app.ui.theme.*
@@ -55,24 +55,28 @@ import kotlinx.coroutines.launch
 
 /**
  * Professional Settings. No native popups anywhere — every choice is an
- * in-app control. Adult key entry lives here:
- * Settings → Adult Content (18+) → enter key → Unlock.
+ * in-app control.
+ *
+ * The API is hidden: there is no API/endpoint setting anywhere in the app;
+ * the app uses only the build-time base URL (ApiClient.DEFAULT_BASE_URL).
+ *
+ * Hidden folder (18+): Settings shows ONE row, "Lock". Tapping it asks for
+ * the password EVERY time; the correct password opens a separate hidden
+ * page ([onOpenHiddenFolder]). Nothing about that page — its name, its
+ * contents, how to reach it — is shown or explained anywhere else.
  */
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onOpenHiddenFolder: () -> Unit) {
     val context = LocalContext.current
     val settings = StreamHubApplication.settings
     val scope = rememberCoroutineScope()
 
-    val apiBaseUrl by settings.apiBaseUrl.collectAsState(initial = ApiClient.DEFAULT_BASE_URL)
     val defaultAudio by settings.defaultAudio.collectAsState(initial = "hindi")
     val skipIntro by settings.skipIntro.collectAsState(initial = true)
     val autoNext by settings.autoNext.collectAsState(initial = true)
     val playbackSpeed by settings.playbackSpeed.collectAsState(initial = 1f)
-    val adultUnlocked by settings.adultUnlocked.collectAsState(initial = false)
 
-    var baseUrlDraft by remember(apiBaseUrl) { mutableStateOf(apiBaseUrl) }
-    var baseUrlSaved by remember { mutableStateOf(false) }
+    var lockOpen by remember { mutableStateOf(false) }
     var keyInput by remember { mutableStateOf("") }
     var keyMessage by remember { mutableStateOf<String?>(null) }
 
@@ -119,72 +123,33 @@ fun SettingsScreen() {
             )
         }
 
-        SettingsSectionTitle("Server")
-        Text("API base URL", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-        OutlinedTextField(
-            value = baseUrlDraft,
-            onValueChange = { baseUrlDraft = it; baseUrlSaved = false },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Red,
-                unfocusedBorderColor = DividerColor,
-                focusedTextColor = TextPrimary,
-                unfocusedTextColor = TextPrimary,
-                cursorColor = Red,
-                focusedContainerColor = SurfaceNight,
-                unfocusedContainerColor = SurfaceNight,
-            ),
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.padding(horizontal = 20.dp)) {
-            Button(
-                onClick = {
-                    scope.launch {
-                        settings.setApiBaseUrl(baseUrlDraft)
-                        baseUrlSaved = true
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = SurfaceElevated, contentColor = TextPrimary),
-                shape = RoundedCornerShape(10.dp),
-            ) { Text("Save", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
-            if (baseUrlSaved) {
-                Spacer(Modifier.width(10.dp))
-                Text("Saved.", color = Color(0xFF46D369), fontSize = 12.sp, modifier = Modifier.align(Alignment.CenterVertically))
-            }
-        }
-
-        SettingsSectionTitle("Adult Content (18+)")
+        SettingsSectionTitle("Lock")
+        // The ONLY entry point to the hidden page: one row, "Lock", no
+        // explanation of what is behind it. Tapping it asks for the
+        // password every time; the correct password opens the separate
+        // hidden page. Wrong password = nothing opens, no hint.
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp)
-                .clip(RoundedCornerShape(14.dp)).background(SurfaceNight).padding(14.dp),
+                .clip(RoundedCornerShape(14.dp)).background(SurfaceNight)
+                .clickable { lockOpen = !lockOpen; keyMessage = null }
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                if (adultUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
-                contentDescription = null, tint = TextMuted,
-            )
+            Icon(Icons.Default.Lock, contentDescription = null, tint = TextMuted)
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    if (adultUnlocked) "Unlocked" else "Locked",
-                    color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp,
-                )
-                Text(
-                    if (adultUnlocked) "The adult section in Extensions is open on this device."
-                    else "Enter the key to unlock the adult section in Extensions.",
-                    color = TextMuted, fontSize = 12.sp, lineHeight = 17.sp,
-                )
-            }
+            Text(
+                "Lock", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = TextMuted)
         }
-        Spacer(Modifier.height(12.dp))
-        if (!adultUnlocked) {
+        if (lockOpen) {
+            Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = keyInput,
                 onValueChange = { keyInput = it; keyMessage = null },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                placeholder = { Text("Enter key", color = TextMuted, fontSize = 12.sp) },
+                placeholder = { Text("Enter password", color = TextMuted, fontSize = 12.sp) },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -205,32 +170,24 @@ fun SettingsScreen() {
                     onClick = {
                         if (AdultGate.isValidKey(keyInput.trim())) {
                             scope.launch {
-                                settings.setAdultUnlocked(true)
-                                // Unlocking turns the adult section ON: enable
-                                // every adult extension at once, so the adult
-                                // browse list is populated the moment the
-                                // section is opened (no empty section).
+                                // Opening the hidden page turns its
+                                // extensions ON, so the browse list is
+                                // populated the moment the page opens.
                                 ExtensionsCatalog.adult.forEach { info ->
                                     StreamHubApplication.extensions.setEnabled(info.id, true)
                                 }
                                 keyInput = ""
-                                keyMessage = "Unlocked. The adult section is now open in Extensions."
+                                keyMessage = null
+                                lockOpen = false
+                                onOpenHiddenFolder()
                             }
                         } else {
-                            keyMessage = "Incorrect key. The adult section stays locked."
+                            keyMessage = "Incorrect password."
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Red),
                     shape = RoundedCornerShape(10.dp),
-                ) { Text("Unlock", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
-            }
-        } else {
-            Row(Modifier.padding(horizontal = 20.dp)) {
-                Button(
-                    onClick = { scope.launch { settings.setAdultUnlocked(false); keyMessage = null } },
-                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceElevated, contentColor = TextPrimary),
-                    shape = RoundedCornerShape(10.dp),
-                ) { Text("Lock again", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                ) { Text("Open", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
             }
         }
         if (keyMessage != null) {

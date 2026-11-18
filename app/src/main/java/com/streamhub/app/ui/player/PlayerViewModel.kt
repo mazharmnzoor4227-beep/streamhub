@@ -16,6 +16,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.streamhub.app.StreamHubApplication
+import com.streamhub.app.data.HistoryStore
 import com.streamhub.app.data.SettingsStore
 import com.streamhub.app.data.api.ApiDetails
 import com.streamhub.app.download.DownloadCache
@@ -55,6 +56,15 @@ import kotlinx.coroutines.launch
  * /api/proxy — the URLs are played exactly as returned, never re-wrapped here.
  * Embed rule: type:"embed" streams are filtered out entirely, never offered.
  */
+/** Frame / aspect mode (v1.0.2, MovieBox-style): Fit = the video's real
+ * aspect ratio (letterboxed); Fill = cropped to fill the screen; Zoom =
+ * Fill + ~1.3x enlargement (the screen scales the SurfaceView). */
+enum class AspectMode(val label: String) {
+    FIT("Fit"),
+    FILL("Fill"),
+    ZOOM("Zoom"),
+}
+
 @UnstableApi
 class PlayerViewModel @JvmOverloads constructor(
     private val repository: Repository = StreamHubApplication.repository,
@@ -175,6 +185,22 @@ class PlayerViewModel @JvmOverloads constructor(
     private val _audioLang = MutableStateFlow("hindi")
     val audioLang: StateFlow<String> = _audioLang.asStateFlow()
 
+    /** Frame / aspect mode (v1.0.2). */
+    private val _aspectMode = MutableStateFlow(AspectMode.FIT)
+    val aspectMode: StateFlow<AspectMode> = _aspectMode.asStateFlow()
+
+    /** True while playing a downloaded file (offline audio switch uses variants). */
+    private val _isOffline = MutableStateFlow(false)
+    val isOffline: StateFlow<Boolean> = _isOffline.asStateFlow()
+
+    /** Downloaded language variants of the current offline episode. */
+    private val _offlineVariants = MutableStateFlow<List<DownloadHelper.DownloadItem>>(emptyList())
+    val offlineVariants: StateFlow<List<DownloadHelper.DownloadItem>> = _offlineVariants.asStateFlow()
+
+    /** Language of the currently playing offline variant. */
+    private val _offlineLang = MutableStateFlow("hindi")
+    val offlineLang: StateFlow<String> = _offlineLang.asStateFlow()
+
     /** True once the player reaches STATE_ENDED (drives Auto Next). */
     private val _playbackEnded = MutableStateFlow(false)
     val playbackEnded: StateFlow<Boolean> = _playbackEnded.asStateFlow()
@@ -209,6 +235,8 @@ class PlayerViewModel @JvmOverloads constructor(
         currentEpisode = episode
         currentSourceId = sourceId
         _audioLang.value = "hindi"
+        _isOffline.value = false
+        _offlineVariants.value = emptyList()
         _playbackEnded.value = false
         if (positionJob?.isActive != true) startPositionPolling()
         viewModelScope.launch {
@@ -246,6 +274,8 @@ class PlayerViewModel @JvmOverloads constructor(
                 context, sourceId, details.id, episode.number,
             )
             buildAndPlay(positionMs = resumeMs)
+            // History: the title is watched from the moment playback starts.
+            runCatching { HistoryStore.record(context, sourceId, details, episode, 0L, 0L) }
             // Loading clears on STATE_READY (playbackListener) or via the
             // 25s watchdog — never here: clearing it right after prepare()
             // is what used to leave a silent black 00:00 screen when the
@@ -289,12 +319,32 @@ class PlayerViewModel @JvmOverloads constructor(
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
         applyCaptionSettings()
+        applyAspectMode()
         player.setMediaItem(item)
         player.prepare()
         if (positionMs > 10_000) player.seekTo(positionMs)
         player.playWhenReady = true
         player.playbackParameters = PlaybackParameters(_speed.value)
         _playbackEnded.value = false
+    }
+
+    /** Cycle Fit → Fill → Zoom (v1.0.2). Applies to the current player immediately. */
+    fun cycleAspectMode() {
+        _aspectMode.value = when (_aspectMode.value) {
+            AspectMode.FIT -> AspectMode.FILL
+            AspectMode.FILL -> AspectMode.ZOOM
+            AspectMode.ZOOM -> AspectMode.FIT
+        }
+        applyAspectMode()
+    }
+
+    /** Fit = letterboxed; Fill/Zoom = cropped to fill (Zoom adds a 1.3x surface scale in the screen). */
+    private fun applyAspectMode() {
+        val player = exoPlayer ?: return
+        player.videoScalingMode = when (_aspectMode.value) {
+            AspectMode.FIT -> C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+            AspectMode.FILL, AspectMode.ZOOM -> C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+        }
     }
 
     /** Switch to another source (quality) keeping the current position. */
@@ -331,9 +381,23 @@ class PlayerViewModel @JvmOverloads constructor(
      * Switch audio language. There is no in-stream multi-audio: the same title
      * is re-searched in the target language and the same episode number is
      * matched (see contract LANGUAGE rule). [targetLang] is "hindi" or "english".
+     * Offline: switch between the DOWNLOADED variants instead (no network).
      */
     fun switchAudio(targetLang: String) {
         val lang = targetLang.lowercase()
+        if (_isOffline.value) {
+            val variant = _offlineVariants.value.firstOrNull { it.lang == lang }
+            if (variant != null) {
+                switchOfflineVariant(variant)
+            } else {
+                _message.value = if (lang == "hindi") {
+                    "Hindi download is not available for this episode."
+                } else {
+                    "English download is not available for this episode."
+                }
+            }
+            return
+        }
         if (lang == _audioLang.value) return
         val details = currentDetails ?: return
         val episode = currentEpisode ?: return
@@ -382,12 +446,26 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /** Play a completed download from the shared offline cache — no network. */
-    fun playOffline(context: Context, item: DownloadHelper.DownloadItem) {
+    fun playOffline(
+        context: Context,
+        item: DownloadHelper.DownloadItem,
+        variants: List<DownloadHelper.DownloadItem> = emptyList(),
+    ) {
         appContext = context.applicationContext
         currentSourceId = item.sourceId
-        currentDetails = null
-        currentEpisode = null
-        _audioLang.value = "hindi"
+        // Offline playback now carries details + episode (v1.0.2): progress
+        // saves and History work exactly like online playback, and the
+        // player resumes the saved position for downloads too.
+        currentDetails = ApiDetails(
+            id = item.contentId, title = item.title, poster = item.posterUrl,
+        )
+        currentEpisode = ApiEpisode(
+            number = item.episodeNumber, title = item.title, data = item.id,
+        )
+        _audioLang.value = item.lang
+        _isOffline.value = true
+        _offlineVariants.value = variants.ifEmpty { listOf(item) }
+        _offlineLang.value = item.lang
         _playbackEnded.value = false
         if (positionJob?.isActive != true) startPositionPolling()
         viewModelScope.launch {
@@ -401,45 +479,90 @@ class PlayerViewModel @JvmOverloads constructor(
                 _isLoading.value = false
                 return@launch
             }
-            val uri = download.request.uri
-            val mime = download.request.mimeType ?: MimeTypes.VIDEO_MP4
-            _sources.value = listOf(
-                ApiStream(
-                    name = "Downloaded",
-                    url = uri.toString(),
-                    quality = null,
-                    type = if (mime == MimeTypes.APPLICATION_M3U8) "m3u8" else "video",
-                    headers = null,
-                    proxy = false,
-                ),
+            val resumeMs = WatchProgressStore.loadPosition(
+                context, item.sourceId, item.contentId, item.episodeNumber,
             )
-            _subtitles.value = emptyList()
-            _currentSourceIndex.value = 0
-            // Cache-backed source: the download's segments are served from the
-            // shared SimpleCache (cache key = the download URL, as enqueued).
-            val cacheFactory = CacheDataSource.Factory()
-                .setCache(DownloadCache.get(context))
-                .setUpstreamDataSourceFactory(DefaultHttpDataSource.Factory())
-            exoPlayer?.release()
-            exoPlayer = ExoPlayer.Builder(context)
-                .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
-                .build()
-                .also { _player.value = it }
-            val player = exoPlayer ?: return@launch
-            player.addListener(cueListener)
-            player.addListener(playbackListener)
-            val mediaItem = MediaItem.Builder()
-                .setUri(uri)
-                .setMimeType(mime)
-                .setCustomCacheKey(uri.toString())
-                .build()
-            player.setMediaItem(mediaItem)
-            player.prepare()
-            player.playWhenReady = true
-            player.playbackParameters = PlaybackParameters(_speed.value)
-            _playbackEnded.value = false
+            val mime = download.request.mimeType ?: MimeTypes.VIDEO_MP4
+            buildOfflinePlayer(download.request.uri, mime, resumeMs)
+            val details = currentDetails
+            val episode = currentEpisode
+            if (details != null && episode != null) {
+                runCatching {
+                    HistoryStore.record(context, item.sourceId, details, episode, 0L, 0L)
+                }
+            }
             armLoadWatchdog()
         }
+    }
+
+    /** Switch to another downloaded language variant of the same episode. */
+    fun switchOfflineVariant(item: DownloadHelper.DownloadItem) {
+        if (!_isOffline.value) return
+        val context = appContext ?: return
+        viewModelScope.launch {
+            _isLoading.value = true
+            _error.value = null
+            currentSourceId = item.sourceId
+            currentEpisode = ApiEpisode(
+                number = item.episodeNumber, title = item.title, data = item.id,
+            )
+            _offlineLang.value = item.lang
+            _audioLang.value = item.lang
+            val download = runCatching {
+                DownloadCache.getDownloadManager(context).downloadIndex.getDownload(item.id)
+            }.getOrNull()
+            if (download == null) {
+                _error.value = "Download not found."
+                _isLoading.value = false
+                return@launch
+            }
+            val pos = exoPlayer?.currentPosition ?: 0L
+            val mime = download.request.mimeType ?: MimeTypes.VIDEO_MP4
+            buildOfflinePlayer(download.request.uri, mime, pos)
+            armLoadWatchdog()
+        }
+    }
+
+    /** Build the offline player for one downloaded file (cache-backed source). */
+    private fun buildOfflinePlayer(uri: android.net.Uri, mime: String, positionMs: Long) {
+        val context = appContext ?: return
+        _sources.value = listOf(
+            ApiStream(
+                name = "Downloaded",
+                url = uri.toString(),
+                quality = null,
+                type = if (mime == MimeTypes.APPLICATION_M3U8) "m3u8" else "video",
+                headers = null,
+                proxy = false,
+            ),
+        )
+        _subtitles.value = emptyList()
+        _currentSourceIndex.value = 0
+        // Cache-backed source: the download's segments are served from the
+        // shared SimpleCache (cache key = the download URL, as enqueued).
+        val cacheFactory = CacheDataSource.Factory()
+            .setCache(DownloadCache.get(context))
+            .setUpstreamDataSourceFactory(DefaultHttpDataSource.Factory())
+        exoPlayer?.release()
+        exoPlayer = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
+            .build()
+            .also { _player.value = it }
+        val player = exoPlayer ?: return
+        player.addListener(cueListener)
+        player.addListener(playbackListener)
+        applyAspectMode()
+        val mediaItem = MediaItem.Builder()
+            .setUri(uri)
+            .setMimeType(mime)
+            .setCustomCacheKey(uri.toString())
+            .build()
+        player.setMediaItem(mediaItem)
+        player.prepare()
+        if (positionMs > 10_000) player.seekTo(positionMs)
+        player.playWhenReady = true
+        player.playbackParameters = PlaybackParameters(_speed.value)
+        _playbackEnded.value = false
     }
 
     fun setCaptionsEnabled(enabled: Boolean) {
@@ -520,6 +643,7 @@ class PlayerViewModel @JvmOverloads constructor(
     private fun startPositionPolling() {
         positionJob?.cancel()
         positionJob = viewModelScope.launch {
+            var tick = 0
             while (true) {
                 delay(500)
                 // Continue (not break) on a null player: buildAndPlay briefly
@@ -531,12 +655,20 @@ class PlayerViewModel @JvmOverloads constructor(
                 if (player.playbackState == Player.STATE_ENDED) {
                     _playbackEnded.value = true
                 }
+                // Periodic save (v1.0.2): every ~10s while playing, so the
+                // position survives a crash/kill — the old code only saved
+                // on exit, and a killed app lost everything watched.
+                tick++
+                if (tick >= 20) {
+                    tick = 0
+                    saveProgressNow()
+                }
             }
         }
     }
 
-    /** Persist progress (Continue Watching) and release the player. */
-    fun releaseAndSave() {
+    /** Persist progress (Continue Watching) + History, without releasing. */
+    private fun saveProgressNow() {
         val context = appContext
         val details = currentDetails
         val episode = currentEpisode
@@ -547,8 +679,14 @@ class PlayerViewModel @JvmOverloads constructor(
             val dur = player.duration.coerceAtLeast(0L)
             if (pos > 0 && dur > 0) {
                 WatchProgressStore.save(context, sourceId, details, episode, pos, dur)
+                HistoryStore.record(context, sourceId, details, episode, pos, dur)
             }
         }
+    }
+
+    /** Persist progress (Continue Watching) and release the player. */
+    fun releaseAndSave() {
+        saveProgressNow()
         positionJob?.cancel()
         exoPlayer?.removeListener(cueListener)
         exoPlayer?.removeListener(playbackListener)

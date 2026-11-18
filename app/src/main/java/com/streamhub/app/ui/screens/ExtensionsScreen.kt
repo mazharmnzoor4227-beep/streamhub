@@ -50,20 +50,15 @@ import kotlinx.coroutines.launch
  * Extensions — the core screen, in the main menu.
  * One extension = one API source. "Install" enables that source locally;
  * only enabled sources are queried for home/search. Only verified-working
- * sources appear. The 18+ section is separate, at the bottom, locked by
- * default — it opens only after the key is entered in Settings.
+ * sources appear. Adult (18+) extensions are NOT listed here at all: they
+ * live only in the hidden page (Settings → Lock → password).
  */
 @Composable
-fun ExtensionsScreen(
-    onBrowseAdult: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
+fun ExtensionsScreen() {
     val extensions = StreamHubApplication.extensions
     val repository = StreamHubApplication.repository
-    val settings = StreamHubApplication.settings
     val scope = rememberCoroutineScope()
     val enabledIds by extensions.enabledIds.collectAsState(initial = emptySet())
-    val adultUnlocked by settings.adultUnlocked.collectAsState(initial = false)
     var liveIds by remember { mutableStateOf<Set<String>?>(null) }
 
     // Sources list — cached first (instant), silent background refresh.
@@ -111,55 +106,6 @@ fun ExtensionsScreen(
                     scope.launch { extensions.setEnabled(info.id, !installed) }
                 },
             )
-        }
-
-        // ---- 18+ section: separate, locked by default ----
-        Text(
-            "Adult (18+)", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 20.dp, top = 28.dp, bottom = 4.dp),
-        )
-        Text(
-            "Kept separate so kids can't use it. Unlock it with the key in Settings.",
-            color = TextMuted, fontSize = 12.sp,
-            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 12.dp),
-        )
-        if (!adultUnlocked) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(14.dp)).background(SurfaceNight).padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Lock, contentDescription = null, tint = TextMuted, modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Locked", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("Enter the key in Settings to unlock.", color = TextMuted, fontSize = 12.sp)
-                }
-                Button(
-                    onClick = onOpenSettings,
-                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceElevated, contentColor = TextPrimary),
-                    shape = RoundedCornerShape(10.dp),
-                ) { Text("Settings", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-            }
-        } else {
-            ExtensionsCatalog.adult.forEach { info ->
-                val live = liveIds?.contains(info.id) ?: true
-                val installed = info.id in enabledIds
-                ExtensionRow(
-                    info = info,
-                    installed = installed,
-                    live = live,
-                    onToggle = {
-                        scope.launch { extensions.setEnabled(info.id, !installed) }
-                    },
-                )
-            }
-            Button(
-                onClick = onBrowseAdult,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Red),
-            ) { Text("Browse Adult", fontWeight = FontWeight.Bold) }
         }
     }
 }

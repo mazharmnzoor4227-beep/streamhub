@@ -30,15 +30,39 @@ data class CategoryDef(
     val title: String,
 )
 
+/** Browse/Discover filter (see [Repository.browseFiltered]). */
+data class BrowseFilter(
+    /** "anime" | "movie" | "series" | null (all types). */
+    val type: String? = null,
+    /** Country display name ("USA", "Germany", "Korea", "Japan", "China", "India") or null. */
+    val country: String? = null,
+    val yearFrom: Int? = null,
+    val yearTo: Int? = null,
+) {
+    /** True when no filter is set at all (plain latest). */
+    fun isEmpty(): Boolean =
+        type == null && country == null && yearFrom == null && yearTo == null
+
+    /** Cache key — letters, digits and ':' only (FeedCache filenames). */
+    fun cacheKey(): String =
+        "browse:${type ?: "all"}:${country ?: "all"}:${yearFrom ?: 0}:${yearTo ?: 0}"
+}
+
+/** Countries the Browse screen offers (each verified live to return content). */
+val BROWSE_COUNTRIES: List<String> = listOf(
+    "USA", "Germany", "Korea", "Japan", "China", "India",
+)
+
 /**
  * Real browse categories (v1.0.2). Every entry is verified live against the
  * API — a category only exists here if it returns real items:
- * - Anime / Hindi Dubbed: client-side type/lang filter over /api/latest.
- * - Movies / Hollywood / Bollywood / K-Drama / C-Drama: the API's own
- *   `category` parameter on /api/latest (moviebox serves the movie ones,
- *   dramacool + ckdub the dramas). Tamil/Telugu are NOT listed: their only
- *   source is animedekho (brand must never appear). Donghua has no source
- *   at all. Pakistani is excluded by user order.
+ * - Anime: /api/latest?type=anime (semantic: anime sources only).
+ * - Movies: /api/latest?type=movie (all movie sources + anime movies).
+ * - Hollywood / Bollywood / K-Drama / C-Drama: the API's own `category`
+ *   parameter on /api/latest (moviebox serves the movie ones, dramacool +
+ *   ckdub the dramas). Tamil/Telugu are NOT listed: their only source is
+ *   animedekho (brand must never appear). Donghua has no source at all.
+ *   Pakistani is excluded by user order.
  */
 val APP_CATEGORIES: List<CategoryDef> = listOf(
     CategoryDef("anime", "Anime"),
@@ -210,10 +234,59 @@ class Repository(
     }
 
     /**
+     * Browse/Discover results for a [BrowseFilter] (v1.0.2). Pages 1–3 are
+     * fetched and merged (deduped by source+id): a single page is NOT
+     * enough — e.g. Germany returns 0 items on pages 1–2 of /api/latest
+     * and only appears from page 3, because the movie source's latest
+     * listing is ordered by recency, not by country. Cached per filter
+     * (FeedCache), so revisiting a filter shows instantly.
+     */
+    suspend fun browseFiltered(filter: BrowseFilter, cached: Boolean = false): List<ApiItem> {
+        val enabled = enabledIds()
+        if (enabled.isEmpty()) return emptyList()
+        val key = filter.cacheKey()
+        if (cached) return feedCache?.get(key).orEmpty().onlyEnabled(enabled)
+        val merged = coroutineScope {
+            (1..3).map { page ->
+                async {
+                    runCatching {
+                        api.browse(
+                            type = filter.type,
+                            country = filter.country,
+                            yearFrom = filter.yearFrom,
+                            yearTo = filter.yearTo,
+                            page = page,
+                        ).results
+                    }.getOrDefault(emptyList())
+                }
+            }.flatMap { it.await() }
+        }
+        val seen = mutableSetOf<String>()
+        val items = merged
+            .filter { item -> seen.add((item.source ?: "") + "|" + item.id) }
+            .onlyEnabled(enabled)
+        if (items.isNotEmpty()) feedCache?.put(key, items)
+        return items
+    }
+
+    /** Browse results from cache only — instant, may be empty. */
+    suspend fun cachedBrowseFiltered(filter: BrowseFilter): List<ApiItem> {
+        ensureCacheLoaded()
+        return browseFiltered(filter, cached = true)
+    }
+
+    /** Browse results from the network (cache updated). */
+    suspend fun refreshBrowseFiltered(filter: BrowseFilter): List<ApiItem> =
+        browseFiltered(filter, cached = false)
+
+    /**
      * One category's items. `cached=true` reads the cache only.
      * Loaders (all verified live):
-     * - anime: /api/latest filtered to series/anime client-side.
-     * - movies/hollywood/bollywood/kdrama/cdrama: /api/latest?category=<id>.
+     * - anime: /api/latest?type=anime (semantic: anime sources only —
+     *   the old client-side type filter wrongly included K-dramas, which
+     *   arrive labelled type "anime").
+     * - movies: /api/latest?type=movie (all movie sources + anime movies).
+     * - hollywood/bollywood/kdrama/cdrama: /api/latest?category=<id>.
      * - hindi: /api/latest?lang=hindi.
      */
     suspend fun categoryItems(categoryId: String, cached: Boolean = false): List<ApiItem> {
@@ -222,15 +295,15 @@ class Repository(
         val key = "category:$categoryId"
         val items = when (categoryId) {
             "anime" -> fetchRail(key, cached) {
-                api.latest(lang = "all", page = 1).results
-            }.filter {
-                it.type.equals("series", ignoreCase = true) ||
-                    it.type.equals("anime", ignoreCase = true)
+                api.browse(type = "anime", page = 1).results
+            }
+            "movies" -> fetchRail(key, cached) {
+                api.browse(type = "movie", page = 1).results
             }
             "hindi" -> fetchRail(key, cached) {
                 api.latest(lang = "hindi", page = 1).results
             }
-            "movies", "hollywood", "bollywood", "kdrama", "cdrama" -> fetchRail(key, cached) {
+            "hollywood", "bollywood", "kdrama", "cdrama" -> fetchRail(key, cached) {
                 api.latest(lang = "all", page = 1, category = categoryId).results
             }
             else -> return emptyList()
@@ -330,8 +403,6 @@ class Repository(
      *   after filtering so the order stays correct).
      */
     suspend fun streams(source: String, data: String): ApiStreamsResponse {
-        // Refresh the cached base URL so proxyUrl() uses the current setting.
-        runCatching { api.currentBaseUrl() }
         val response = runCatching { api.streams(source, data) }.getOrNull()
             ?: return ApiStreamsResponse()
         val playable = response.streams
@@ -350,6 +421,11 @@ class Repository(
      * [targetLang], load details, and match [episodeNumber].
      * Returns the matching episode's opaque `data` plus its source, or null
      * when no same-episode match exists in that language.
+     *
+     * Movies ([episodeNumber] == 0): the details carry a single
+     * pseudo-episode (number 1 in the MovieBox details, 0 in the app's
+     * own pseudo-episode) — match the FIRST episode with data instead of
+     * an exact number, since a movie has exactly one playable item.
      */
     suspend fun findSameEpisode(
         title: String,
@@ -366,16 +442,20 @@ class Repository(
             val source = item.source ?: continue
             val details = runCatching { api.details(source, item.id) }.getOrNull()
                 ?: continue
-            for (season in details.seasons.orEmpty()) {
-                for (episode in season.episodes.orEmpty()) {
-                    if (episode.number == episodeNumber && !episode.data.isNullOrBlank()) {
-                        return SameEpisode(
-                            source = source,
-                            data = episode.data,
-                            title = episode.title,
-                        )
-                    }
+            val episodes = details.seasons.orEmpty().flatMap { it.episodes.orEmpty() }
+            val match = if (episodeNumber == 0) {
+                episodes.firstOrNull { !it.data.isNullOrBlank() }
+            } else {
+                episodes.firstOrNull {
+                    it.number == episodeNumber && !it.data.isNullOrBlank()
                 }
+            }
+            if (match != null) {
+                return SameEpisode(
+                    source = source,
+                    data = match.data!!,
+                    title = match.title,
+                )
             }
         }
         return null
