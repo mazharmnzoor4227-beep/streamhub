@@ -1,7 +1,7 @@
 # StreamHub — BUILD CONTRACT (v1.0)
 
 Fresh Kotlin/Compose app, CloudStream-style UX, own code (NOT a CloudStream fork).
-Package `com.mazharansari.streamhub`, v1.0/code 1, minSdk 24, targetSdk/compileSdk 35.
+Package `com.streamhub.app`, v1.0/code 1, minSdk 24, targetSdk/compileSdk 35.
 Original reference (READ ONLY, never edit): `~/workspace/cinemora-app/CINEMORA-Android`.
 Project: `~/workspace/streamhub-app`. API base URL default:
 `https://strategy-terry-masters-king.trycloudflare.com` (configurable in Settings).

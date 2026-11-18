@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.mazharansari.streamhub"
+    namespace = "com.streamhub.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.mazharansari.streamhub"
+        applicationId = "com.streamhub.app"
         minSdk = 24
         targetSdk = 35
         versionCode = 3
