@@ -7,9 +7,9 @@ import org.junit.Test
 /**
  * v1.0.3 — category → API request mapping. Every mapping is verified live
  * against /api/latest (2026-11-18): each category returns items that are
- * ACTUALLY that category. Donghua maps to null on purpose: no API source
- * serves it (?category=donghua returns 0 items, ?type=donghua is ignored
- * by the server and returns unfiltered everything).
+ * ACTUALLY that category. Donghua maps to ?category=donghua (40 items p1,
+ * all China — Link Click, To Be Hero X; verified live after the API track
+ * fixed it 2026-11-18).
  */
 class CategoryRequestTest {
 
@@ -42,8 +42,8 @@ class CategoryRequestTest {
     }
 
     @Test
-    fun `donghua has no mapping - no API source serves it`() {
-        assertNull(categoryRequest("donghua"))
+    fun `donghua uses category param`() {
+        assertEquals(CategoryRequest(category = "donghua"), categoryRequest("donghua"))
     }
 
     @Test
