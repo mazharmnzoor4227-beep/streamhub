@@ -8,6 +8,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
@@ -82,6 +83,16 @@ class PlayerViewModel @JvmOverloads constructor(
 
     private val _captionsEnabled = MutableStateFlow(true)
     val captionsEnabled: StateFlow<Boolean> = _captionsEnabled.asStateFlow()
+
+    /** Current subtitle cues, fed to the standalone SubtitleView. */
+    private val _cues = MutableStateFlow<List<Cue>>(emptyList())
+    val cues: StateFlow<List<Cue>> = _cues.asStateFlow()
+
+    private val cueListener = object : Player.Listener {
+        override fun onCues(cues: List<Cue>) {
+            _cues.value = cues
+        }
+    }
 
     /** Label of the selected subtitle track, or null. Resolved to a language internally. */
     private val _preferredSubtitleLang = MutableStateFlow<String?>(null)
@@ -202,6 +213,8 @@ class PlayerViewModel @JvmOverloads constructor(
             .also { _player.value = it }
         val player = exoPlayer ?: return
 
+        // Standalone SubtitleView has no setPlayer: cues arrive via listener.
+        player.addListener(cueListener)
         val subtitleConfigs = _subtitles.value.map { sub ->
             MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(sub.url))
                 .setMimeType(
@@ -335,6 +348,7 @@ class PlayerViewModel @JvmOverloads constructor(
                 .build()
                 .also { _player.value = it }
             val player = exoPlayer ?: return@launch
+            player.addListener(cueListener)
             val mediaItem = MediaItem.Builder()
                 .setUri(uri)
                 .setMimeType(mime)
@@ -457,9 +471,11 @@ class PlayerViewModel @JvmOverloads constructor(
             }
         }
         positionJob?.cancel()
+        exoPlayer?.removeListener(cueListener)
         exoPlayer?.release()
         exoPlayer = null
         _player.value = null
+        _cues.value = emptyList()
     }
 
     override fun onCleared() {

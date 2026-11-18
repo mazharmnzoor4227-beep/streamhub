@@ -157,6 +157,7 @@ fun PlayerScreen(
     val skipIntroRange by viewModel.skipIntroRange.collectAsState()
     val playbackEnded by viewModel.playbackEnded.collectAsState()
     val player by viewModel.player.collectAsState()
+    val cues by viewModel.cues.collectAsState()
 
     val autoNextEnabled by viewModel.autoNext.collectAsState()
     val skipIntroEnabled by viewModel.skipIntro.collectAsState()
@@ -212,12 +213,13 @@ fun PlayerScreen(
             viewModel.clearMessage()
         }
     }
-    // Attach the video surface + subtitle view whenever the player is rebuilt
+    // Attach the video surface whenever the player is rebuilt
     // (quality / audio switches rebuild the ExoPlayer instance).
+    // Subtitles are fed separately: the ViewModel forwards onCues to the
+    // SubtitleView via setCues (SubtitleView has no setPlayer in Media3).
     LaunchedEffect(player) {
         val p = player
         surfaceView?.let { if (p != null) p.setVideoSurfaceView(it) }
-        subtitleView?.setPlayer(p)
     }
     // Auto Next: once per episode, shortly after playback ends.
     LaunchedEffect(playbackEnded) {
@@ -389,7 +391,7 @@ fun PlayerScreen(
                 },
                 update = { sv ->
                     subtitleView = sv
-                    sv.setPlayer(player)
+                    sv.setCues(cues)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
