@@ -4,7 +4,7 @@ Fresh Kotlin/Compose app, own code (NOT a CloudStream fork). Anime, Hindi-dub
 movies, Hollywood, Bollywood, K-drama and C-drama — all streaming inside the
 app through inbuilt extensions served by the StreamHub API.
 
-- Package: `com.streamhub.app` — v1.0 (code 1)
+- Package: `com.mazharansari.streamhub` — v1.0 (code 1)
 - Min SDK 24 · Target/Compile SDK 35 · Kotlin 2.0.21 · Media3 ExoPlayer 1.4.1
 - No demo/sample content: every list is real API data; empty until it loads.
 
