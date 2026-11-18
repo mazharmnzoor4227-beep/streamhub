@@ -55,12 +55,14 @@ import kotlinx.coroutines.delay
  * Blank query shows what's popular right now (real API items, never demo).
  * Adult sources are never searched here (Repository filters them out).
  *
- * SLIM STICKY HEADER (v1.0.2): the old header — big 27sp title + subtitle +
+ * SLIM FIXED HEADER (v1.0.2): the old header — big 27sp title + subtitle +
  * search box + TWO stacked chip rows + a full-width heading — ate a third
- * to a half of the portrait screen and never scrolled away. Now the sticky
- * header is just a small title, the search box and ONE horizontally
- * scrollable chip row (~150dp incl. status bar); the section heading
- * scrolls away with the grid, so the content gets the screen.
+ * to a half of the portrait screen and never scrolled away. Now the header
+ * is just a small title, the search box and ONE horizontally scrollable
+ * chip row (~150dp incl. status bar), pinned above the grid; the section
+ * heading scrolls away with the grid, so the content gets the screen.
+ * (LazyGridScope has no stickyHeader — only LazyListScope does — so the
+ * header lives in a Column above the LazyVerticalGrid instead.)
  *
  * Query + filters + grid state are hoisted by the app root, so leaving for
  * Details/Player and coming back restores the same query, results and
@@ -135,19 +137,13 @@ fun SearchScreen(
         }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        state = gridState,
-        modifier = Modifier.fillMaxSize().background(Night),
-        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 18.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        stickyHeader {
-            Column(
-                Modifier.fillMaxWidth().background(Night)
-                    .statusBarsPadding().padding(top = 8.dp, bottom = 8.dp),
-            ) {
+    Column(Modifier.fillMaxSize().background(Night)) {
+        // Slim fixed header: pinned at the top while the grid scrolls
+        // beneath it. ~150dp incl. status bar — content gets the screen.
+        Column(
+            Modifier.fillMaxWidth()
+                .statusBarsPadding().padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+        ) {
                 Text(
                     "Search", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = 8.dp),
@@ -188,8 +184,15 @@ fun SearchScreen(
                         FilterChip(item, item == typeFilter) { onTypeFilterChange(item) }
                     }
                 }
-            }
         }
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            state = gridState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
         // Small section heading — scrolls away with the grid, not pinned.
         item(span = { GridItemSpan(3) }) {
             Text(
@@ -216,6 +219,7 @@ fun SearchScreen(
             items(filtered, key = { (it.source ?: "") + "|" + it.id }) { item ->
                 PosterCard(item, { onItemClick(item) }, modifier = Modifier.fillMaxWidth(), artHeight = 168.dp)
             }
+        }
         }
     }
 }
