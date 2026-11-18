@@ -81,6 +81,7 @@ private fun categorySubtitle(id: String): String = when (id) {
     "bollywood" -> "Bollywood movies"
     "kdrama" -> "Korean dramas"
     "cdrama" -> "Chinese dramas"
+    "donghua" -> "Chinese animation"
     "hindi" -> "Hindi-dubbed titles"
     else -> "Titles"
 }

@@ -72,17 +72,15 @@ data class CategoryRequest(
  * - hollywood/bollywood/kdrama/cdrama: ?category=<id> (all correct
  *   country/type, verified live).
  * - hindi: ?lang=hindi.
- * - DONGHUA IS DELIBERATELY ABSENT: no API source serves it —
- *   ?category=donghua returns 0 items and ?type=donghua is IGNORED by
- *   the server (returns 500 unfiltered items). Listing it would show
- *   wrong content; it stays out until the API serves it (API track).
+ * - donghua: ?category=donghua (40 items p1, all China — Link Click,
+ *   To Be Hero X; verified live 2026-11-18 after the API track fixed it).
  */
 fun categoryRequest(categoryId: String): CategoryRequest? = when (categoryId) {
     "anime" -> CategoryRequest(type = "anime")
     "movies" -> CategoryRequest(type = "movie")
     "series" -> CategoryRequest(type = "series")
     "hindi" -> CategoryRequest(lang = "hindi")
-    "hollywood", "bollywood", "kdrama", "cdrama" -> CategoryRequest(category = categoryId)
+    "hollywood", "bollywood", "kdrama", "cdrama", "donghua" -> CategoryRequest(category = categoryId)
     else -> null
 }
 
@@ -120,9 +118,8 @@ fun applyFastStart(streams: List<ApiStream>, fastStart: String?): List<ApiStream
  * - Series: /api/latest?type=series (drama/series sources).
  * - Hollywood / Bollywood / K-Drama / C-Drama: the API's own `category`
  *   parameter on /api/latest (moviebox serves the movie ones, dramacool +
- *   ckdub the dramas). Tamil/Telugu are NOT listed: their only source is
- *   animedekho (brand must never appear). Donghua has no source at all
- *   (see [categoryRequest]). Pakistani is excluded by user order.
+ *   ckdub the dramas; reanime serves donghua). Tamil/Telugu are NOT listed: their only source is
+ *   animedekho (brand must never appear). Pakistani is excluded by user order.
  */
 val APP_CATEGORIES: List<CategoryDef> = listOf(
     CategoryDef("anime", "Anime"),
@@ -132,6 +129,7 @@ val APP_CATEGORIES: List<CategoryDef> = listOf(
     CategoryDef("bollywood", "Bollywood"),
     CategoryDef("kdrama", "K-Drama"),
     CategoryDef("cdrama", "C-Drama"),
+    CategoryDef("donghua", "Donghua"),
     CategoryDef("hindi", "Hindi Dubbed"),
 )
 
