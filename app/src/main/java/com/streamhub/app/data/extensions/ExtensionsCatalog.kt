@@ -5,10 +5,13 @@ package com.streamhub.app.data.extensions
  * The live list of sources still comes from `GET /api/sources`; this catalog
  * only supplies display info and the first-run default-enabled set.
  *
- * NOTE: `hentaihaven` is listed here for the hidden folder (18+) only. Its
- * source IS in the API (v1.5.0, verified live 2026-11-18: search + streams +
- * proxy all work, English subtitles, no Hindi dub), but it must only ever be
+ * NOTE: the adult entries are listed here for the hidden folder (18+)
+ * only. Their sources ARE in the API (v1.0.3, verified live 2026-11-18:
+ * search + streams + proxy all work), but they must only ever be
  * queried from the hidden page — never from home/search/trending.
+ * HentaiHaven is adult anime (English subtitles, no Hindi dub);
+ * Pornhub / XNXX / Xvideos / RedTube / YouPorn are adult video sites.
+ * Eporner stays OUT: its video CDN 403s the server IP (v1.0.3).
  */
 data class ExtensionInfo(
     val id: String,
@@ -107,13 +110,62 @@ object ExtensionsCatalog {
             category = "Movies",
             description = "Hollywood movies, some with Hindi dub.",
         ),
-        // Hidden folder only — live in the API (v1.5.0), gated by the password.
+        // Hidden folder only — live in the API (v1.0.3), gated by the password.
+        // v1.0.4: the 5 video adult sources were in the API since v1.0.3
+        // but were never registered here, so the Lock page only ever
+        // showed HentaiHaven. Registering them flows them into the
+        // Extensions rows, the source filter chips and the browse fan-out.
         ExtensionInfo(
             id = "hentaihaven",
             name = "HentaiHaven",
             language = "English",
             category = "Adult",
             description = "Adult anime (18+). English subtitles.",
+            isAdult = true,
+            available = true,
+        ),
+        ExtensionInfo(
+            id = "pornhub",
+            name = "Pornhub",
+            language = "English",
+            category = "Adult",
+            description = "Adult videos (18+). Largest catalogue.",
+            isAdult = true,
+            available = true,
+        ),
+        ExtensionInfo(
+            id = "xnxx",
+            name = "XNXX",
+            language = "English",
+            category = "Adult",
+            description = "Adult videos (18+).",
+            isAdult = true,
+            available = true,
+        ),
+        ExtensionInfo(
+            id = "xvideos",
+            name = "Xvideos",
+            language = "English",
+            category = "Adult",
+            description = "Adult videos (18+).",
+            isAdult = true,
+            available = true,
+        ),
+        ExtensionInfo(
+            id = "redtube",
+            name = "RedTube",
+            language = "English",
+            category = "Adult",
+            description = "Adult videos (18+).",
+            isAdult = true,
+            available = true,
+        ),
+        ExtensionInfo(
+            id = "youporn",
+            name = "YouPorn",
+            language = "English",
+            category = "Adult",
+            description = "Adult videos (18+).",
             isAdult = true,
             available = true,
         ),
