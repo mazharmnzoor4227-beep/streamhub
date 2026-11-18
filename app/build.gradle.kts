@@ -13,8 +13,8 @@ android {
         applicationId = "com.streamhub.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
         // 18+ gate key hash (SHA-256 hex). Empty = locked for everyone. NEVER ship a real key here;
         // the value is set from the user-provided key at release time.
         buildConfigField("String", "ADULT_KEY_HASH", "\"bd336581dacc92e40cbb487834880baf0add0ea4caf8ee952c105a01541f4197\"")
@@ -76,12 +76,16 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
+    // OkHttp data source for ExoPlayer (v1.0.3: pooling, HTTP/2, DoH) —
+    // replaces DefaultHttpDataSource, which dropped stream headers.
+    implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
 
     // Images
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     // Networking + HTML parsing (built-in providers)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
     implementation("org.jsoup:jsoup:1.18.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.2")
@@ -89,4 +93,6 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    testImplementation("junit:junit:4.13.2")
 }

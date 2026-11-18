@@ -75,7 +75,10 @@ class StreamHubApplication : Application(), ImageLoaderFactory {
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(256L * 1024L * 1024L)
+                    // v1.0.3: capped at 96MB (was 256MB) — posters are small
+                    // and re-fetch cheaply through the proxy; the old cap
+                    // was a third of the app's ~500MB footprint.
+                    .maxSizeBytes(96L * 1024L * 1024L)
                     .build()
             }
             .crossfade(true)

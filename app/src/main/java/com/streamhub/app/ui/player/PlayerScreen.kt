@@ -165,6 +165,9 @@ fun PlayerScreen(
     val message by viewModel.message.collectAsState()
     val speed by viewModel.speed.collectAsState()
     val audioLang by viewModel.audioLang.collectAsState()
+    // REAL audio languages (v1.0.3): only languages the API confirmed for
+    // this exact episode — never a hardcoded Hindi/English list.
+    val availableAudioLanguages by viewModel.availableAudioLanguages.collectAsState()
     val aspectMode by viewModel.aspectMode.collectAsState()
     val isOffline by viewModel.isOffline.collectAsState()
     val offlineVariantsState by viewModel.offlineVariants.collectAsState()
@@ -304,10 +307,10 @@ fun PlayerScreen(
         if ((src.quality ?: 0) > 0) "${src.quality}p" else src.name
     } ?: "Auto"
     // Offline: the audio label is the downloaded variant's language.
+    // Online: the label of the language actually playing.
     val audioLabel = when {
-        isOffline -> if (offlineLang == "hindi") "Hindi" else "English"
-        audioLang == "hindi" -> "Hindi"
-        else -> "English"
+        isOffline -> languageDisplayName(offlineLang)
+        else -> languageDisplayName(audioLang)
     }
     val subtitleLabel = when {
         !captionsEnabled -> "Off"
@@ -682,25 +685,32 @@ fun PlayerScreen(
                             MenuOption(label = "No downloaded audio", selected = false) { openMenu = null }
                         } else {
                             variants.forEach { variant ->
-                                val label = when (variant.lang.lowercase()) {
-                                    "hindi" -> "Hindi"
-                                    "english" -> "English"
-                                    else -> variant.lang.replaceFirstChar { it.uppercase() }
-                                }
-                                MenuOption(label = label, selected = offlineLang == variant.lang) {
+                                MenuOption(
+                                    label = languageDisplayName(variant.lang),
+                                    selected = offlineLang == variant.lang,
+                                ) {
                                     viewModel.switchOfflineVariant(variant)
                                     openMenu = null
                                 }
                             }
                         }
                     } else {
-                        MenuOption(label = "Hindi", selected = audioLang == "hindi") {
-                            viewModel.switchAudio("hindi")
-                            openMenu = null
-                        }
-                        MenuOption(label = "English", selected = audioLang == "english") {
-                            viewModel.switchAudio("english")
-                            openMenu = null
+                        // REAL languages only (v1.0.3): the menu lists exactly
+                        // the languages the API confirmed for this episode
+                        // (availableAudioLanguages). One language → one row;
+                        // switching resumes at the same position.
+                        if (availableAudioLanguages.isEmpty()) {
+                            MenuOption(label = "No audio options", selected = false) { openMenu = null }
+                        } else {
+                            availableAudioLanguages.forEach { lang ->
+                                MenuOption(
+                                    label = languageDisplayName(lang),
+                                    selected = audioLang == lang,
+                                ) {
+                                    viewModel.switchAudio(lang)
+                                    openMenu = null
+                                }
+                            }
                         }
                     }
                 }

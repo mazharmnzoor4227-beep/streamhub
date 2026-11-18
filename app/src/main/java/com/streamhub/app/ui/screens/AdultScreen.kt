@@ -1,6 +1,8 @@
 package com.streamhub.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -44,10 +47,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.streamhub.app.StreamHubApplication
+import com.streamhub.app.data.HistoryStore
 import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.data.extensions.ExtensionInfo
 import com.streamhub.app.data.extensions.ExtensionsCatalog
@@ -58,10 +65,11 @@ import kotlinx.coroutines.launch
 
 /**
  * The hidden folder (18+) — a separate page reachable ONLY from
- * Settings → Lock → password, every time. It is NOT a tab, NOT in
- * Extensions, NOT on Home, and nothing in the app names or explains it.
+ * Settings → Lock → password, every time. It is NOT a tab, NOT in the
+ * main nav, NOT on Home, and nothing in the app names or explains it.
  * Everything adult lives ONLY here: the browse/discover list (across ALL
- * installed adult extensions) + search + the adult extensions themselves
+ * installed adult extensions, with a per-source filter + pagination) +
+ * search + adult watch history + the adult extensions themselves
  * (install/manage). Nothing here ever leaks into Home, Search, trending
  * or recommendations.
  *
@@ -82,7 +90,10 @@ fun AdultScreen(
     // Hoisted by the app root: grid position survives leaving for
     // Details/Player and coming back.
     gridState: LazyGridState,
+    // Resume an adult history entry (same path as Home's History rail).
+    onResumeHistory: (HistoryStore.HistoryEntry) -> Unit = {},
 ) {
+    val context = LocalContext.current
     val repository = StreamHubApplication.repository
     val scope = rememberCoroutineScope()
     val enabledIds by StreamHubApplication.extensions.enabledIds.collectAsState(initial = emptySet())
@@ -94,6 +105,17 @@ fun AdultScreen(
     var results by remember { mutableStateOf<List<ApiItem>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var liveIds by remember { mutableStateOf<Set<String>?>(null) }
+    // v1.0.3: per-source filter (the API has no adult genre/category
+    // endpoint — each installed adult source IS the category) + "Load
+    // more" pagination over the broad-search pages.
+    var sourceFilter by remember { mutableStateOf<String?>(null) }
+    var browsePage by remember { mutableStateOf(1) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var browseExhausted by remember { mutableStateOf(false) }
+    // Adult history ONLY here (v1.0.3) — never on Home.
+    val adultHistory = remember(enabledAdult) {
+        HistoryStore.loadAll(context, includeAdult = true).filter { it.isAdult }
+    }
 
     // Live status for the adult extension rows — cached first (instant).
     LaunchedEffect(Unit) {
@@ -118,6 +140,8 @@ fun AdultScreen(
             return@LaunchedEffect
         }
         browseLoading = true
+        browsePage = 1
+        browseExhausted = false
         val cached = runCatching { repository.cachedAdultBrowse(enabledAdult) }.getOrDefault(emptyList())
         if (cached.isNotEmpty()) {
             browse = cached
@@ -145,8 +169,30 @@ fun AdultScreen(
     }
 
     val showingSearch = query.isNotBlank()
-    val shown = if (showingSearch) results else browse
+    // Per-source filter applies to browse AND search results.
+    val shownUnfiltered = if (showingSearch) results else browse
+    val shown = if (sourceFilter == null) shownUnfiltered
+    else shownUnfiltered.filter { it.source == sourceFilter }
     val loading = if (showingSearch) searching else browseLoading
+
+    fun loadMore() {
+        if (loadingMore || browseExhausted || showingSearch) return
+        loadingMore = true
+        scope.launch {
+            val nextPage = browsePage + 1
+            val more = runCatching {
+                repository.adultBrowsePage(enabledAdult, nextPage)
+            }.getOrDefault(emptyList())
+            if (more.isEmpty()) {
+                browseExhausted = true
+            } else {
+                browsePage = nextPage
+                val seen = browse.map { (it.source ?: "") + "|" + it.id }.toSet()
+                browse = browse + more.filter { (it.source ?: "") + "|" + it.id !in seen }
+            }
+            loadingMore = false
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(Night).statusBarsPadding().padding(top = 8.dp)) {
         Row(
@@ -205,6 +251,38 @@ fun AdultScreen(
             )
         }
         Spacer(Modifier.height(12.dp))
+        // Adult watch history (v1.0.3) — lives ONLY on this page, never
+        // on Home. Tap resumes exactly where the user left off.
+        if (adultHistory.isNotEmpty()) {
+            Text(
+                "History", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 20.dp, bottom = 8.dp),
+            )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(start = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                adultHistory.take(10).forEach { entry ->
+                    AdultHistoryCard(entry) { onResumeHistory(entry) }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+        // Per-source filter (v1.0.3): each installed adult source is its
+        // own category — the API exposes no adult genre/category list.
+        if (enabledAdult.isNotEmpty()) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(start = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AdultFilterChip("All", sourceFilter == null) { sourceFilter = null }
+                enabledAdult.sorted().forEach { sourceId ->
+                    val name = ExtensionsCatalog.byId(sourceId)?.name ?: sourceId
+                    AdultFilterChip(name, sourceFilter == sourceId) { sourceFilter = sourceId }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
         if (loading) {
             Row(Modifier.fillMaxWidth().padding(22.dp), horizontalArrangement = Arrangement.Center) {
                 CircularProgressIndicator(color = Red, modifier = Modifier.size(28.dp))
@@ -238,7 +316,90 @@ fun AdultScreen(
                 items(shown, key = { it.id }) { item ->
                     PosterCard(item, { onItemClick(item) }, modifier = Modifier.fillMaxWidth(), artHeight = 168.dp)
                 }
+                // "Load more" pagination (v1.0.3): next broad-search page
+                // across all installed adult sources. Hidden while
+                // searching (search is one page) and once exhausted.
+                if (!showingSearch && !browseExhausted && shown.isNotEmpty()) {
+                    item(span = { GridItemSpan(3) }) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Button(
+                                onClick = { loadMore() },
+                                enabled = !loadingMore,
+                                colors = ButtonDefaults.buttonColors(containerColor = Red),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text(
+                                    if (loadingMore) "Loading…" else "Load more",
+                                    fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                                )
+                            }
+                        }
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun AdultFilterChip(text: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier.clip(RoundedCornerShape(50))
+            .background(if (selected) Red else SurfaceElevated)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+    ) {
+        Text(
+            text,
+            color = if (selected) Color.White else TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** Compact adult-history card (poster + title + episode + time ago). */
+@Composable
+private fun AdultHistoryCard(
+    entry: HistoryStore.HistoryEntry,
+    onClick: () -> Unit,
+) {
+    val posterUrl = entry.poster?.let { StreamHubApplication.apiClient.posterUrl(it) }
+    Row(
+        modifier = Modifier.width(250.dp).clip(RoundedCornerShape(14.dp)).background(SurfaceNight)
+            .clickable(onClick = onClick).padding(9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.width(64.dp).height(88.dp).clip(RoundedCornerShape(10.dp))
+                .background(SurfaceElevated),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (posterUrl != null) {
+                AsyncImage(
+                    model = posterUrl,
+                    contentDescription = entry.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    entry.title.take(1).uppercase(), color = TextMuted,
+                    fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(entry.title, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2)
+            Text(
+                (if (entry.episodeNumber > 0) "Episode ${entry.episodeNumber}" else "Movie") +
+                    " · " + HistoryStore.formatAgo(entry.watchedAtMs),
+                color = TextMuted, fontSize = 10.sp,
+            )
         }
     }
 }

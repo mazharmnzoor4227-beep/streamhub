@@ -80,4 +80,10 @@ class FeedCache(context: Context) {
             }
         }
     }
+
+    /** Clear the in-memory lists (used by Settings → Clear cache). */
+    fun clearMemory() {
+        memory.clear()
+        sourcesMemory = null
+    }
 }

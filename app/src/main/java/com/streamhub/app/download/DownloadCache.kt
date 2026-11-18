@@ -13,6 +13,7 @@ import java.util.concurrent.Executors
 /** Shared on-disk cache used by both the player and the download service. */
 object DownloadCache {
     private var cache: SimpleCache? = null
+    private var playerCache: SimpleCache? = null
     private var databaseProvider: DatabaseProvider? = null
     private var downloadManager: DownloadManager? = null
 
@@ -29,6 +30,21 @@ object DownloadCache {
             LeastRecentlyUsedCacheEvictor(2L * 1024 * 1024 * 1024),
             getDatabaseProvider(context),
         ).also { cache = it }
+    }
+
+    /**
+     * Streaming (non-download) video cache (v1.0.3): a separate LRU
+     * SimpleCache for the player, capped at 300MB — segments already
+     * watched are served from disk instead of re-fetched. Kept apart from
+     * the download cache so streaming never evicts completed downloads.
+     */
+    @Synchronized
+    fun getPlayerCache(context: Context): SimpleCache {
+        return playerCache ?: SimpleCache(
+            File(context.applicationContext.filesDir, "player_cache"),
+            LeastRecentlyUsedCacheEvictor(300L * 1024 * 1024),
+            getDatabaseProvider(context),
+        ).also { playerCache = it }
     }
 
     /**

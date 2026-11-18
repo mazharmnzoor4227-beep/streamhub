@@ -11,16 +11,19 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import com.streamhub.app.StreamHubApplication
 import com.streamhub.app.data.HistoryStore
 import com.streamhub.app.data.SettingsStore
 import com.streamhub.app.data.api.ApiDetails
+import com.streamhub.app.data.extensions.ExtensionsCatalog
 import com.streamhub.app.download.DownloadCache
 import com.streamhub.app.download.DownloadHelper
+import com.streamhub.app.player.PlayerHttp
 import com.streamhub.app.player.SkipIntro
 import com.streamhub.app.data.api.ApiEpisode
 import com.streamhub.app.data.api.ApiStream
@@ -106,17 +109,19 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Playback-state listener (v1.0.2): without this, a stream that fails
-     * to load left the player on a silent black 00:00/00:00 screen forever
-     * — `_isLoading` was cleared right after `prepare()` and no error was
-     * ever surfaced. Now STATE_READY clears loading, BUFFERING shows the
-     * spinner again, and any fatal error becomes a visible error state
-     * (the screen shows Retry + "Try another server").
+     * Playback-state listener (v1.0.2, failover v1.0.3): without this, a
+     * stream that fails to load left the player on a silent black 00:00/00:00
+     * screen forever — `_isLoading` was cleared right after `prepare()` and
+     * no error was ever surfaced. Now STATE_READY clears loading, BUFFERING
+     * shows the spinner again, and any fatal error AUTO-FAILOVERS to the
+     * next mirror (CloudStream pattern) — the error screen appears ONLY
+     * after ALL mirrors are exhausted (see [autoFailover]).
      */
     private val playbackListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_READY -> {
+                    sawFirstFrame = true
                     _isLoading.value = false
                 }
                 Player.STATE_BUFFERING -> {
@@ -130,28 +135,80 @@ class PlayerViewModel @JvmOverloads constructor(
 
         override fun onPlayerError(error: PlaybackException) {
             _isLoading.value = false
-            _error.value = "This video could not be played. " +
-                "Check your connection or try another server."
+            autoFailover()
         }
     }
 
     /**
-     * Load watchdog (v1.0.2): if the player still has not reached READY
-     * 25s after a load starts (e.g. the upstream host 502s and ExoPlayer
-     * keeps retrying silently), surface a clear error instead of a black
-     * screen. Each load bumps [loadGeneration]; the watchdog only fires
-     * for the load that is still current.
+     * Multi-server AUTO-failover (v1.0.3, CloudStream pattern): on any
+     * fatal PlaybackException — before the first frame, or an IO error
+     * mid-play — mark the current mirror failed and auto-load the next
+     * unfailed mirror at the same position, with a toast
+     * ("Server 1 failed, trying Server 2…"). The error screen is set ONLY
+     * when every mirror has failed. Returns true when a failover started.
+     */
+    private val failedSourceIndices = mutableSetOf<Int>()
+    private var sawFirstFrame = false
+
+    private fun autoFailover(): Boolean {
+        val sources = _sources.value
+        if (sources.size < 2) {
+            setAllMirrorsFailedError()
+            return false
+        }
+        failedSourceIndices.add(_currentSourceIndex.value)
+        val next = nextUnfailedIndex() ?: run {
+            setAllMirrorsFailedError()
+            return false
+        }
+        val from = _currentSourceIndex.value + 1
+        val to = next + 1
+        val pos = exoPlayer?.currentPosition ?: 0L
+        _currentSourceIndex.value = next
+        _error.value = null
+        _isLoading.value = true
+        _message.value = "Server $from failed, trying Server $to…"
+        buildAndPlay(pos)
+        armLoadWatchdog()
+        return true
+    }
+
+    private fun setAllMirrorsFailedError() {
+        _error.value = "This video could not be played. " +
+            "Check your connection or try another server."
+    }
+
+    /** Next mirror index that has not failed yet (cyclic from current), or null when all failed. */
+    private fun nextUnfailedIndex(): Int? {
+        val size = _sources.value.size
+        if (size == 0) return null
+        for (step in 1..size) {
+            val candidate = (_currentSourceIndex.value + step) % size
+            if (candidate !in failedSourceIndices) return candidate
+        }
+        return null
+    }
+
+    /**
+     * Load watchdog (v1.0.3: 9s, was 25s): if the player still has not
+     * reached READY ~9s after a load starts (e.g. the upstream host 502s
+     * and ExoPlayer keeps retrying silently), FAIL OVER to the next mirror
+     * instead of sitting on a black screen — the error screen appears
+     * only when no mirror is left. Each load bumps [loadGeneration]; the
+     * watchdog only fires for the load that is still current.
      */
     private var loadGeneration = 0
 
     private fun armLoadWatchdog() {
         val generation = ++loadGeneration
         viewModelScope.launch {
-            delay(25_000)
+            delay(9_000)
             if (generation == loadGeneration && _isLoading.value && _error.value == null) {
-                _isLoading.value = false
-                _error.value = "Taking too long to load. " +
-                    "Check your connection or try another server."
+                // Still no first frame: treat the current mirror as dead
+                // and fail over (or show the error when none is left).
+                if (!autoFailover()) {
+                    _isLoading.value = false
+                }
             }
         }
     }
@@ -181,9 +238,19 @@ class PlayerViewModel @JvmOverloads constructor(
     private val _speed = MutableStateFlow(1f)
     val speed: StateFlow<Float> = _speed.asStateFlow()
 
-    /** Current audio language ("hindi" default, or "english"). */
+    /** Current audio language code (e.g. "hindi"); see [availableAudioLanguages]. */
     private val _audioLang = MutableStateFlow("hindi")
     val audioLang: StateFlow<String> = _audioLang.asStateFlow()
+
+    /**
+     * REAL audio languages for the current title (v1.0.3) — language codes
+     * CONFIRMED by the API (see [probeAudioLanguages]): the current
+     * language, plus every other language for which the same episode
+     * actually exists. The player menu shows ONLY these — never a
+     * hardcoded Hindi/English list. One language → one menu row.
+     */
+    private val _availableAudioLanguages = MutableStateFlow<List<String>>(listOf("hindi"))
+    val availableAudioLanguages: StateFlow<List<String>> = _availableAudioLanguages.asStateFlow()
 
     /** Frame / aspect mode (v1.0.2). */
     private val _aspectMode = MutableStateFlow(AspectMode.FIT)
@@ -235,6 +302,9 @@ class PlayerViewModel @JvmOverloads constructor(
         currentEpisode = episode
         currentSourceId = sourceId
         _audioLang.value = "hindi"
+        _availableAudioLanguages.value = listOf("hindi")
+        failedSourceIndices.clear()
+        sawFirstFrame = false
         _isOffline.value = false
         _offlineVariants.value = emptyList()
         _playbackEnded.value = false
@@ -251,8 +321,13 @@ class PlayerViewModel @JvmOverloads constructor(
                 _isLoading.value = false
                 return@launch
             }
+            // v1.0.3: FRESH aggregated streams — /api/streams_all?fresh=1
+            // across all sources, falling back to /api/streams?fresh=1.
+            // Signed URLs expire in ~1 min, so a cached/stale URL is
+            // usually dead by play time; resolving fresh at play time is
+            // what makes titles play at all.
             val response = try {
-                repository.streams(sourceId, data)
+                repository.playStreams(sourceId, data, details.title, details.type)
             } catch (e: Exception) {
                 _error.value = "Could not load streams. Check your connection and try again."
                 _isLoading.value = false
@@ -269,32 +344,83 @@ class PlayerViewModel @JvmOverloads constructor(
             }
             _sources.value = playable
             _subtitles.value = response.subtitles.orEmpty()
-            _currentSourceIndex.value = 0
+            // Direct MP4s start at the LOWEST quality (fast first frame);
+            // HLS/DASH starts at index 0 and adapts up from the lowest
+            // variant (see the low initial bandwidth estimate in
+            // [buildAndPlay]).
+            _currentSourceIndex.value = initialSourceIndex(playable)
             val resumeMs = WatchProgressStore.loadPosition(
                 context, sourceId, details.id, episode.number,
             )
             buildAndPlay(positionMs = resumeMs)
             // History: the title is watched from the moment playback starts.
-            runCatching { HistoryStore.record(context, sourceId, details, episode, 0L, 0L) }
+            runCatching {
+                HistoryStore.record(
+                    context, sourceId, details, episode, 0L, 0L,
+                    isAdult = sourceId in ADULT_SOURCE_IDS,
+                )
+            }
             // Loading clears on STATE_READY (playbackListener) or via the
-            // 25s watchdog — never here: clearing it right after prepare()
+            // 9s watchdog — never here: clearing it right after prepare()
             // is what used to leave a silent black 00:00 screen when the
             // stream itself failed to load.
             armLoadWatchdog()
+            // Real audio languages (background): which languages does this
+            // exact episode exist in? The menu updates when the probe
+            // answers — never a hardcoded list.
+            probeAudioLanguages(details, episode)
+        }
+    }
+
+    /**
+     * Probe which audio languages the current episode really exists in.
+     * Candidates are the languages the API knows ([AUDIO_CANDIDATES]);
+     * a language is listed ONLY when [Repository.findSameEpisode] finds
+     * the same episode in it. Runs in the background after playback
+     * starts, so it never delays the first frame.
+     */
+    private fun probeAudioLanguages(details: ApiDetails, episode: ApiEpisode) {
+        viewModelScope.launch {
+            val found = mutableListOf(_audioLang.value)
+            for (lang in AUDIO_CANDIDATES) {
+                if (lang == _audioLang.value) continue
+                val match = runCatching {
+                    repository.findSameEpisode(details.title, episode.number, lang)
+                }.getOrNull()
+                if (match != null && lang !in found) found.add(lang)
+            }
+            _availableAudioLanguages.value = found
         }
     }
 
     private fun buildAndPlay(positionMs: Long) {
         val context = appContext ?: return
         val source = _sources.value.getOrNull(_currentSourceIndex.value) ?: return
-        val httpFactory = DefaultHttpDataSource.Factory()
+        // v1.0.3: OkHttpDataSource (connection pooling, HTTP/2, keep-alive,
+        // 10s timeouts, DNS-over-HTTPS) over a 300MB LRU SimpleCache —
+        // NOT DefaultHttpDataSource. Direct (proxy:false) streams get their
+        // CDN headers as request headers; proxy:true streams already carry
+        // Referer/UA inside the /api/proxy URL (see ApiClient.proxyUrl).
+        // The adaptive track selector starts from a LOW bandwidth estimate
+        // (500 kbps), so HLS/DASH begins on the lowest variant and steps
+        // up as real bandwidth is measured. Media3 DEFAULT buffers are
+        // kept (first frame needs only ~2.5s buffered).
+        val upstreamFactory = OkHttpDataSource.Factory(PlayerHttp.client())
             .setDefaultRequestProperties(source.headers.orEmpty())
+        val cacheFactory = CacheDataSource.Factory()
+            .setCache(DownloadCache.getPlayerCache(context))
+            .setUpstreamDataSourceFactory(upstreamFactory)
         // setMediaSourceFactory exists only on ExoPlayer.Builder, not on the
         // player instance — and the factory carries this source's headers, so
         // rebuild the player here (quality / audio switches re-enter here).
         exoPlayer?.release()
         exoPlayer = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
+            .setBandwidthMeter(
+                DefaultBandwidthMeter.Builder(context)
+                    .setInitialBitrateEstimate(500_000)
+                    .build(),
+            )
             .build()
             .also { _player.value = it }
         val player = exoPlayer ?: return
@@ -353,6 +479,7 @@ class PlayerViewModel @JvmOverloads constructor(
         if (index !in _sources.value.indices) return
         val pos = exoPlayer?.currentPosition ?: 0L
         _currentSourceIndex.value = index
+        failedSourceIndices.remove(index)
         _error.value = null
         _isLoading.value = true
         buildAndPlay(pos)
@@ -360,14 +487,16 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /**
-     * "Try another server" (v1.0.2): when the current stream fails (e.g.
-     * its host 502s — MovieBox's CDN did exactly this for
-     * "Perverted Teacher"), switch to the next available source/quality
-     * at the same position. Returns false when there is nothing else to try.
+     * "Try another server" (v1.0.2, failover-aware v1.0.3): when the
+     * current stream fails (e.g. its host 502s — MovieBox's CDN did
+     * exactly this for "Perverted Teacher"), switch to the next
+     * NOT-YET-FAILED source/quality at the same position. Returns false
+     * when there is nothing else to try.
      */
     fun tryNextSource(): Boolean {
         if (_sources.value.size < 2) return false
-        val next = (_currentSourceIndex.value + 1) % _sources.value.size
+        failedSourceIndices.add(_currentSourceIndex.value)
+        val next = nextUnfailedIndex() ?: return false
         val pos = exoPlayer?.currentPosition ?: 0L
         _currentSourceIndex.value = next
         _error.value = null
@@ -378,10 +507,14 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Switch audio language. There is no in-stream multi-audio: the same title
-     * is re-searched in the target language and the same episode number is
-     * matched (see contract LANGUAGE rule). [targetLang] is "hindi" or "english".
+     * Switch audio language (v1.0.3: REAL languages only). There is no
+     * in-stream multi-audio: the same title is re-searched in the target
+     * language and the same episode number is matched (see contract
+     * LANGUAGE rule). [targetLang] is a language code from
+     * [availableAudioLanguages] — a language the probe already confirmed
+     * exists for this episode — never a hardcoded list.
      * Offline: switch between the DOWNLOADED variants instead (no network).
+     * Resumes at the same position.
      */
     fun switchAudio(targetLang: String) {
         val lang = targetLang.lowercase()
@@ -390,11 +523,7 @@ class PlayerViewModel @JvmOverloads constructor(
             if (variant != null) {
                 switchOfflineVariant(variant)
             } else {
-                _message.value = if (lang == "hindi") {
-                    "Hindi download is not available for this episode."
-                } else {
-                    "English download is not available for this episode."
-                }
+                _message.value = "${languageDisplayName(lang)} download is not available for this episode."
             }
             return
         }
@@ -411,18 +540,15 @@ class PlayerViewModel @JvmOverloads constructor(
                 null
             }
             if (found == null) {
-                _message.value = if (lang == "hindi") {
-                    "Hindi dub is not available for this episode."
-                } else {
-                    "English audio is not available for this episode."
-                }
+                _message.value = "${languageDisplayName(lang)} audio is not available for this episode."
                 _isLoading.value = false
                 return@launch
             }
             currentSourceId = found.source
             _audioLang.value = lang
             val response = try {
-                repository.streams(found.source, found.data)
+                // Fresh streams in the target language (server lang= param).
+                repository.playStreams(found.source, found.data, details.title, details.type)
             } catch (_: Exception) {
                 _message.value = "Could not load streams in this language."
                 _isLoading.value = false
@@ -439,7 +565,12 @@ class PlayerViewModel @JvmOverloads constructor(
             val pos = exoPlayer?.currentPosition ?: 0L
             _sources.value = playable
             _subtitles.value = response.subtitles.orEmpty()
-            _currentSourceIndex.value = 0
+            _currentSourceIndex.value = initialSourceIndex(playable)
+            failedSourceIndices.clear()
+            sawFirstFrame = false
+            if (lang !in _availableAudioLanguages.value) {
+                _availableAudioLanguages.value = _availableAudioLanguages.value + lang
+            }
             buildAndPlay(pos)
             armLoadWatchdog()
         }
@@ -488,7 +619,10 @@ class PlayerViewModel @JvmOverloads constructor(
             val episode = currentEpisode
             if (details != null && episode != null) {
                 runCatching {
-                    HistoryStore.record(context, item.sourceId, details, episode, 0L, 0L)
+                    HistoryStore.record(
+                        context, item.sourceId, details, episode, 0L, 0L,
+                        isAdult = item.sourceId in ADULT_SOURCE_IDS,
+                    )
                 }
             }
             armLoadWatchdog()
@@ -540,9 +674,10 @@ class PlayerViewModel @JvmOverloads constructor(
         _currentSourceIndex.value = 0
         // Cache-backed source: the download's segments are served from the
         // shared SimpleCache (cache key = the download URL, as enqueued).
+        // Same OkHttp upstream as online playback (pooling/HTTP/2/DoH).
         val cacheFactory = CacheDataSource.Factory()
             .setCache(DownloadCache.get(context))
-            .setUpstreamDataSourceFactory(DefaultHttpDataSource.Factory())
+            .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(PlayerHttp.client()))
         exoPlayer?.release()
         exoPlayer = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
@@ -679,7 +814,10 @@ class PlayerViewModel @JvmOverloads constructor(
             val dur = player.duration.coerceAtLeast(0L)
             if (pos > 0 && dur > 0) {
                 WatchProgressStore.save(context, sourceId, details, episode, pos, dur)
-                HistoryStore.record(context, sourceId, details, episode, pos, dur)
+                HistoryStore.record(
+                    context, sourceId, details, episode, pos, dur,
+                    isAdult = sourceId in ADULT_SOURCE_IDS,
+                )
             }
         }
     }
@@ -716,6 +854,61 @@ internal fun subtitleLabelToLang(label: String): String? {
         "urdu" in lower -> "ur"
         else -> null
     }
+}
+
+/** Adult source ids (hidden-folder extensions) — for History adult-flagging. */
+internal val ADULT_SOURCE_IDS: Set<String> =
+    ExtensionsCatalog.adult.map { it.id }.toSet()
+
+/**
+ * Languages the audio probe checks (v1.0.3). These are CANDIDATES, not a
+ * menu: a language appears in the player menu ONLY when
+ * [Repository.findSameEpisode] confirms the same episode exists in it.
+ * "hindi" is the default audio, so it is always probed first (it is the
+ * language already playing).
+ */
+internal val AUDIO_CANDIDATES: List<String> = listOf("hindi", "english")
+
+/**
+ * First-play source index (v1.0.3). HLS/DASH: index 0 — the adaptive
+ * selector starts on the lowest variant (low initial bandwidth estimate)
+ * and steps up. Direct MP4s: the LOWEST quality index, so the first frame
+ * arrives fast on a slow connection; the user can still pick higher
+ * quality from the menu.
+ */
+internal fun initialSourceIndex(streams: List<ApiStream>): Int {
+    if (streams.isEmpty()) return 0
+    if (streams.first().type.equals("m3u8", ignoreCase = true)) return 0
+    var lowestIndex = 0
+    var lowestQuality = Int.MAX_VALUE
+    streams.forEachIndexed { index, stream ->
+        val quality = stream.quality ?: 0
+        if (quality < lowestQuality) {
+            lowestQuality = quality
+            lowestIndex = index
+        }
+    }
+    return lowestIndex
+}
+
+/** Display name for an audio language code (menu label + messages). */
+internal fun languageDisplayName(lang: String): String = when (lang.lowercase()) {
+    "hindi", "hi" -> "Hindi"
+    "english", "en" -> "English"
+    "urdu", "ur" -> "Urdu"
+    "japanese", "ja" -> "Japanese"
+    "korean", "ko" -> "Korean"
+    "chinese", "zh", "cn" -> "Chinese"
+    "spanish", "es" -> "Spanish"
+    "french", "fr" -> "French"
+    "german", "de" -> "German"
+    "portuguese", "pt" -> "Portuguese"
+    "arabic", "ar" -> "Arabic"
+    "tamil", "ta" -> "Tamil"
+    "telugu", "te" -> "Telugu"
+    "bengali", "bn" -> "Bengali"
+    "indonesian", "in", "id" -> "Indonesian"
+    else -> lang.replaceFirstChar { it.uppercase() }
 }
 
 /**

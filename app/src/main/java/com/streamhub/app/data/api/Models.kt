@@ -1,5 +1,6 @@
 package com.streamhub.app.data.api
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
@@ -79,6 +80,8 @@ data class ApiStream(
     val headers: Map<String, String>? = null,
     val proxy: Boolean = false,
     val label: String? = null,
+    /** Source id the mirror came from (only set by /api/streams_all). */
+    val source: String? = null,
 )
 
 @Serializable
@@ -91,4 +94,25 @@ data class ApiSubtitle(
 data class ApiStreamsResponse(
     val streams: List<ApiStream> = emptyList(),
     val subtitles: List<ApiSubtitle>? = null,
+    /**
+     * Fast-start hint (v1.0.3): when the server knows which stream starts
+     * fastest (a URL, or a CDN host), it names it here. The player tries
+     * that stream first; ignored when absent or when it matches nothing.
+     */
+    @SerialName("fast_start")
+    val fastStart: String? = null,
+)
+
+/**
+ * Aggregated streams for one title across ALL sources (v1.0.3):
+ * GET /api/streams_all?title=&type=&source=&data=&fresh=1 — same shape as
+ * [ApiStreamsResponse] plus the per-stream `source` the mirror came from.
+ * Deduped by host client-side; the server orders working CDNs first.
+ */
+@Serializable
+data class ApiStreamsAllResponse(
+    val streams: List<ApiStream> = emptyList(),
+    val subtitles: List<ApiSubtitle>? = null,
+    @SerialName("fast_start")
+    val fastStart: String? = null,
 )

@@ -51,6 +51,7 @@ import com.streamhub.app.data.WatchlistStore
 import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.data.api.APP_CATEGORIES
 import com.streamhub.app.data.api.HomeSection
+import com.streamhub.app.data.extensions.ExtensionsCatalog
 import com.streamhub.app.ui.components.BrandHeader
 import com.streamhub.app.ui.components.CategoryChips
 import com.streamhub.app.ui.components.PosterArtwork
@@ -59,6 +60,9 @@ import com.streamhub.app.ui.components.SectionHeading
 import com.streamhub.app.ui.components.SmallTag
 import com.streamhub.app.ui.player.WatchProgressStore
 import com.streamhub.app.ui.theme.*
+
+/** Adult source ids — adult items never appear on Home (v1.0.3). */
+private val ADULT_IDS: Set<String> = ExtensionsCatalog.adult.map { it.id }.toSet()
 
 /**
  * Home: brand header, language filter, hero billboard, Continue Watching,
@@ -130,12 +134,17 @@ fun HomeScreen(
         }
     }
 
-    val continueWatching = remember(sections) { WatchProgressStore.loadAll(context) }
+    val continueWatching = remember(sections) {
+        // Adult titles never surface on Home (v1.0.3) — Continue Watching
+        // included: an adult episode's progress must not leak here.
+        WatchProgressStore.loadAll(context).filter { it.sourceId !in ADULT_IDS }
+    }
     // My List + History (v1.0.2): local stores, re-read every time Home
     // re-enters composition (after Details/Player), so a title saved or
-    // watched just now shows up immediately.
-    val myList = remember { WatchlistStore.loadAll(context) }
-    val history = remember { HistoryStore.loadAll(context) }
+    // watched just now shows up immediately. Adult items are excluded
+    // from both (v1.0.3) — adult history lives ONLY in the Lock page.
+    val myList = remember { WatchlistStore.loadAll(context).filter { it.source !in ADULT_IDS } }
+    val history = remember { HistoryStore.loadAll(context, includeAdult = false) }
     val featured = sections.firstOrNull()?.items?.firstOrNull()
 
     Column(

@@ -29,6 +29,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,10 +49,13 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.streamhub.app.StreamHubApplication
 import com.streamhub.app.data.AdultGate
+import com.streamhub.app.data.StorageStats
 import com.streamhub.app.data.extensions.ExtensionsCatalog
 import com.streamhub.app.ui.components.CategoryChips
 import com.streamhub.app.ui.theme.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Professional Settings. No native popups anywhere — every choice is an
@@ -79,6 +83,14 @@ fun SettingsScreen(onOpenHiddenFolder: () -> Unit) {
     var lockOpen by remember { mutableStateOf(false) }
     var keyInput by remember { mutableStateOf("") }
     var keyMessage by remember { mutableStateOf<String?>(null) }
+
+    // Storage breakdown (v1.0.3): re-read after a cache clear.
+    var storage by remember { mutableStateOf<StorageStats.Breakdown?>(null) }
+    var storageTick by remember { mutableStateOf(0) }
+    var cacheClearedMessage by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(storageTick) {
+        storage = withContext(Dispatchers.IO) { StorageStats.breakdown(context) }
+    }
 
     Column(
         Modifier.fillMaxSize().background(Night).statusBarsPadding()
@@ -194,13 +206,54 @@ fun SettingsScreen(onOpenHiddenFolder: () -> Unit) {
             Text(keyMessage!!, color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         }
 
+        SettingsSectionTitle("Storage")
+        // v1.0.3: storage breakdown + Clear cache. Clearing wipes the
+        // image/list/video caches only — downloads are NEVER deleted here.
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(14.dp)).background(SurfaceNight).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val breakdown = storage
+            if (breakdown == null) {
+                Text("Measuring storage…", color = TextMuted, fontSize = 13.sp)
+            } else {
+                StorageRow("Images", StorageStats.format(breakdown.imageCacheBytes))
+                StorageRow("Lists", StorageStats.format(breakdown.feedCacheBytes))
+                StorageRow("Video cache", StorageStats.format(breakdown.playerCacheBytes))
+                StorageRow("Downloads", StorageStats.format(breakdown.downloadsBytes))
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Total", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(StorageStats.format(breakdown.totalBytes), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { StorageStats.clearCaches(context) }
+                        StreamHubApplication.feedCache.clearMemory()
+                        cacheClearedMessage = "Cache cleared. Downloads were kept."
+                        storageTick++
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = SurfaceElevated, contentColor = TextPrimary),
+                shape = RoundedCornerShape(10.dp),
+            ) { Text("Clear cache", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+            if (cacheClearedMessage != null) {
+                Text(cacheClearedMessage!!, color = TextMuted, fontSize = 12.sp)
+            }
+        }
+
         SettingsSectionTitle("About")
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp)
                 .clip(RoundedCornerShape(14.dp)).background(SurfaceNight).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("StreamHub 1.0.2", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text("StreamHub 1.0.3", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
             Text("Developed by Mazhar Ansari", color = TextMuted, fontSize = 13.sp)
             Button(
                 onClick = {
@@ -211,6 +264,17 @@ fun SettingsScreen(onOpenHiddenFolder: () -> Unit) {
                 shape = RoundedCornerShape(10.dp),
             ) { Text("GitHub: mazharmnzoor4227-beep", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
         }
+    }
+}
+
+@Composable
+private fun StorageRow(label: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, color = TextMuted, fontSize = 13.sp)
+        Text(value, color = TextPrimary, fontSize = 13.sp)
     }
 }
 

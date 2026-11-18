@@ -17,8 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -49,14 +49,15 @@ import com.streamhub.app.data.api.ApiItem
 import com.streamhub.app.data.api.APP_CATEGORIES
 import com.streamhub.app.data.api.BrowseFilter
 import com.streamhub.app.data.api.HomeSection
+import com.streamhub.app.data.extensions.ExtensionsCatalog
 import com.streamhub.app.download.DownloadHelper
 import com.streamhub.app.ui.player.PlayerScreen
 import com.streamhub.app.ui.screens.AdultScreen
 import com.streamhub.app.ui.screens.BrowseScreen
+import com.streamhub.app.ui.screens.CategoriesScreen
 import com.streamhub.app.ui.screens.CategoryScreen
 import com.streamhub.app.ui.screens.DetailsScreen
 import com.streamhub.app.ui.screens.DownloadsScreen
-import com.streamhub.app.ui.screens.ExtensionsScreen
 import com.streamhub.app.ui.screens.HistoryScreen
 import com.streamhub.app.ui.screens.HomeScreen
 import com.streamhub.app.ui.screens.SearchScreen
@@ -65,10 +66,16 @@ import com.streamhub.app.ui.screens.SettingsScreen
 import com.streamhub.app.ui.theme.*
 import kotlinx.coroutines.launch
 
+/** Adult source ids — adult items never appear outside the Lock page. */
+private val ADULT_IDS: Set<String> = ExtensionsCatalog.adult.map { it.id }.toSet()
+
 enum class MainTab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
     SEARCH("Search", Icons.Default.Search),
-    EXTENSIONS("Extensions", Icons.Default.Extension),
+    // v1.0.3: Categories REPLACES Extensions. Extensions are pre-installed
+    // by Mazhar himself — customers must NEVER see an Extensions option
+    // anywhere in the main nav or screens.
+    CATEGORIES("Categories", Icons.Default.Category),
     DOWNLOADS("Downloads", Icons.Default.Download),
     SETTINGS("Settings", Icons.Default.Settings),
 }
@@ -92,7 +99,7 @@ fun StreamHubApp() {
     var selectedItem by remember { mutableStateOf<Pair<ApiItem, String>?>(null) }
     var playTarget by remember { mutableStateOf<PlayTarget?>(null) }
     // The hidden folder (18+): a separate page reachable ONLY from
-    // Settings → Lock → password. It is NOT a tab, NOT in Extensions,
+    // Settings → Lock → password. It is NOT a tab, NOT in the main nav,
     // NOT on Home — it exists only while this flag is set, and opening it
     // always requires the password again (see SettingsScreen).
     var showHiddenFolder by remember { mutableStateOf(false) }
@@ -267,6 +274,12 @@ fun StreamHubApp() {
                         onItemClick = { openItem(it) },
                         onBack = { showHiddenFolder = false },
                         gridState = adultGridState,
+                        onResumeHistory = { entry ->
+                            resumeTitle(
+                                entry.sourceId, entry.detailsId, entry.episodeNumber,
+                                entry.title, entry.poster,
+                            )
+                        },
                     )
                 }
                 seeAllSection != null -> {
@@ -302,7 +315,7 @@ fun StreamHubApp() {
                 showMyList -> {
                     SeeAllScreen(
                         title = "My List",
-                        items = WatchlistStore.loadAll(context),
+                        items = WatchlistStore.loadAll(context).filter { it.source !in ADULT_IDS },
                         gridState = myListGridState,
                         onItemClick = { openItem(it) },
                         onBack = { showMyList = false },
@@ -351,7 +364,10 @@ fun StreamHubApp() {
                         typeFilter = searchTypeFilter,
                         onTypeFilterChange = { searchTypeFilter = it },
                     )
-                    MainTab.EXTENSIONS -> ExtensionsScreen()
+                    MainTab.CATEGORIES -> CategoriesScreen(
+                        onCategoryClick = { openCategory(it) },
+                        onBrowseClick = { showBrowse = true },
+                    )
                     MainTab.DOWNLOADS -> DownloadsScreen(
                         onPlayOffline = { item, variants ->
                             playTarget = PlayTarget.Offline(item, variants)

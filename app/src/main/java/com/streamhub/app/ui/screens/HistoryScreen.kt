@@ -53,7 +53,8 @@ fun HistoryScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    var entries by remember { mutableStateOf(HistoryStore.loadAll(context)) }
+    // Adult history NEVER shows here (v1.0.3) — it lives only in the Lock page.
+    var entries by remember { mutableStateOf(HistoryStore.loadAll(context, includeAdult = false)) }
     var confirmClear by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().background(Night).statusBarsPadding()) {

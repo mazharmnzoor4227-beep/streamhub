@@ -61,9 +61,34 @@ class ApiClient(
     /**
      * Proxied playback/download URL for a raw stream URL.
      * `proxy:true` streams must ALWAYS be played via this URL, never raw.
+     *
+     * v1.0.3 — THE #1 PLAYBACK BUG: the old version built
+     * `/api/proxy?url=<raw>` and DROPPED the stream's Referer/User-Agent,
+     * so segments hit hotlink-protected CDNs with no Referer → 403 →
+     * proxy 502 → ExoPlayer error on every title. The proxy accepts
+     * `&referer=` + `&ua=` (BUILD-CONTRACT.md); pass the stream's
+     * `headers` here and they are forwarded (URL-encoded) to the CDN.
+     * Headers are looked up case-insensitively ("Referer"/"referer",
+     * "User-Agent"/"user-agent"). No headers → plain `?url=` as before.
      */
-    fun proxyUrl(rawUrl: String): String =
-        "$DEFAULT_BASE_URL/api/proxy?url=${URLEncoder.encode(rawUrl, "UTF-8")}"
+    fun proxyUrl(rawUrl: String, headers: Map<String, String>? = null): String {
+        val base = "$DEFAULT_BASE_URL/api/proxy?url=${URLEncoder.encode(rawUrl, "UTF-8")}"
+        if (headers.isNullOrEmpty()) return base
+        val referer = headerValue(headers, "Referer")
+        val ua = headerValue(headers, "User-Agent")
+        val extra = StringBuilder()
+        if (!referer.isNullOrBlank()) {
+            extra.append("&referer=").append(URLEncoder.encode(referer, "UTF-8"))
+        }
+        if (!ua.isNullOrBlank()) {
+            extra.append("&ua=").append(URLEncoder.encode(ua, "UTF-8"))
+        }
+        return base + extra.toString()
+    }
+
+    /** Case-insensitive header lookup (servers return either casing). */
+    fun headerValue(headers: Map<String, String>, name: String): String? =
+        headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 
     /**
      * Poster/artwork URL, routed through `/api/proxy` (same fast origin as
@@ -262,15 +287,62 @@ class ApiClient(
      * Streams for one episode (`data` is the opaque episode data, verbatim).
      * Sorted best quality first (null quality last); `proxy`/`headers` kept
      * intact. Empty response on any failure.
+     *
+     * v1.0.3: `fresh=1` bypasses the server's 10-min streams cache —
+     * signed stream URLs expire in ~1 min, so a cached URL is usually
+     * dead by play time. `lang` asks the server for that audio language
+     * when it can serve it (accepted by the API; the app still falls back
+     * to re-searching the title in that language — see
+     * [Repository.findSameEpisode]).
      */
-    suspend fun streams(source: String, data: String): ApiStreamsResponse {
+    suspend fun streams(
+        source: String,
+        data: String,
+        fresh: Boolean = true,
+        lang: String? = null,
+    ): ApiStreamsResponse {
         if (source in EXCLUDED_SOURCES) return ApiStreamsResponse()
         val response = runCatching {
             getJson<ApiStreamsResponse>(
                 "/api/streams",
-                mapOf("source" to source, "data" to data),
+                mapOf(
+                    "source" to source,
+                    "data" to data,
+                    "fresh" to if (fresh) "1" else null,
+                    "lang" to lang,
+                ),
             )
         }.getOrNull() ?: return ApiStreamsResponse()
+        return response.copy(streams = sortStreams(response.streams))
+    }
+
+    /**
+     * Aggregated streams for one title across ALL sources (v1.0.3).
+     * GET /api/streams_all?title=&type=&source=&data=&fresh=1 — deduped by
+     * host, working-CDN-first, with `fast_start`. Returns an empty
+     * response when the endpoint is unavailable (404) or fails; callers
+     * fall back to [streams]. Never throws.
+     */
+    suspend fun streamsAll(
+        title: String,
+        type: String? = null,
+        source: String? = null,
+        data: String? = null,
+        fresh: Boolean = true,
+    ): ApiStreamsAllResponse {
+        if (title.isBlank()) return ApiStreamsAllResponse()
+        val response = runCatching {
+            getJson<ApiStreamsAllResponse>(
+                "/api/streams_all",
+                mapOf(
+                    "title" to title,
+                    "type" to type,
+                    "source" to source,
+                    "data" to data,
+                    "fresh" to if (fresh) "1" else null,
+                ),
+            )
+        }.getOrNull() ?: return ApiStreamsAllResponse()
         return response.copy(streams = sortStreams(response.streams))
     }
 
