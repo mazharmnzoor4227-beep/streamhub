@@ -44,9 +44,11 @@ object PlayerHttp {
             )
             .build()
         // DoH first, system DNS as fallback — never fail a lookup outright.
-        val dns = Dns { hostname ->
-            runCatching { doh.lookup(hostname) }
-                .getOrElse { Dns.SYSTEM.lookup(hostname) }
+        // (OkHttp's Dns is a Kotlin interface, not a SAM: explicit object.)
+        val dns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                runCatching { doh.lookup(hostname) }
+                    .getOrElse { Dns.SYSTEM.lookup(hostname) }
         }
         return OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
